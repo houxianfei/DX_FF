@@ -1,0 +1,2 @@
+channel_id,rod_id,range_kind,min_position,max_position
+CH1,0,absolute_safe,3800,4000

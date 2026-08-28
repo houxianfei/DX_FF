@@ -1,0 +1,2 @@
+channel_id,rod_id,name,hard_min,hard_max,soft_min,soft_max,zero_position,safe_position,safe_position_valid,stroke_slope,stroke_bias,inward_direction,max_velocity,max_acceleration,max_deceleration,position_tolerance,stable_time_ms,move_timeout_ms,layer_mask
+CH1,0,CH1-R0,0,4095,100,4000,2048,3900,true,1,0,1,300,100,100,5,100,5000,1

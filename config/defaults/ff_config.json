@@ -1,0 +1,13 @@
+{
+  "schema": "ff-config",
+  "schema_version": 2,
+  "machine_id": "FF-001",
+  "config_version": "FF-CONFIG-1.0",
+  "max_active_rod_count": 8,
+  "status_expiration_ms": 200,
+  "channels": [
+    {"id":"CH1","controller":{"name":"CTRL-CH1","serial":{"port":"COM3","baud_rate":115200,"timeout_ms":500}},"rods":[{"id":0,"name":"CH1-R0","hard_min":0,"hard_max":4095,"soft_min":100,"soft_max":4000,"zero_position":2048,"safe_position":3900,"safe_position_valid":true,"stroke_slope":1,"stroke_bias":0,"inward_direction":1,"max_velocity":300,"max_acceleration":100,"max_deceleration":100,"position_tolerance":5,"stable_time_ms":100,"move_timeout_ms":5000,"layer_mask":1}]},
+    {"id":"CH2","controller":{"name":"CTRL-CH2","serial":{"port":"COM4","baud_rate":115200,"timeout_ms":500}},"rods":[]},
+    {"id":"CH3","controller":{"name":"CTRL-CH3","serial":{"port":"COM5","baud_rate":115200,"timeout_ms":500}},"rods":[]}
+  ]
+}
