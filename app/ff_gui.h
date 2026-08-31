@@ -16,10 +16,10 @@ public:
 
 private:
   ff::FFApplicationService service_;
-  ff::MotionPlan plan_;
   std::vector<ff::RodTarget> targets_;
   std::string configPath_;
   std::string iniPath_;
+  std::string presetDirectory_;
   std::string notice_;
   std::array<std::string, 3> serialPorts_{"COM3", "COM4", "COM5"};
   std::vector<std::string> availablePorts_;
@@ -28,10 +28,17 @@ private:
   bool configLoaded_{false};
   bool targetsInitialized_{false};
   int activeChannel_{0};
+  int selectedPresetSlot_{0};
+  std::vector<int> presetSlots_;
   void ensureConfig();
   void loadUiSettings();
   void saveUiSettings() const;
   void scanSerialPorts();
+  void refreshPresetSlots();
+  bool hasPresetSlot(int slot) const;
+  std::string presetPath(int slot) const;
+  bool savePreset(int slot, const std::vector<ff::RodTarget> &targets);
+  std::vector<ff::RodTarget> loadPreset(int slot) const;
   void welcome();
   void dashboard();
   void drawChannel(int index, const ff::FFStatus &status);

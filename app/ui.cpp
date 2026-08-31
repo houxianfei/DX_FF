@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <sstream>
 
 namespace fs = std::filesystem;
 namespace ff_gui {
@@ -55,9 +57,86 @@ MainUi::MainUi() {
                                                : root / "ff_config.json")
                     .string();
   iniPath_ = (root / "ff_gui.ini").string();
+  presetDirectory_ = (root / "position_presets").string();
+  fs::create_directories(presetDirectory_);
+  refreshPresetSlots();
   loadUiSettings();
   scanSerialPorts();
   ensureConfig();
+}
+
+void MainUi::refreshPresetSlots() {
+  presetSlots_.clear();
+  const std::regex fileNamePattern(R"(^slot_([0-9]+)\.csv$)");
+  std::error_code error;
+  for (const auto &entry : fs::directory_iterator(presetDirectory_, error)) {
+    if (error || !entry.is_regular_file())
+      continue;
+    std::smatch match;
+    const auto name = entry.path().filename().string();
+    if (!std::regex_match(name, match, fileNamePattern))
+      continue;
+    try {
+      presetSlots_.push_back(std::stoi(match[1].str()));
+    } catch (const std::exception &) {
+      // Ignore file names outside the supported slot-number range.
+    }
+  }
+  std::sort(presetSlots_.begin(), presetSlots_.end());
+  presetSlots_.erase(std::unique(presetSlots_.begin(), presetSlots_.end()),
+                     presetSlots_.end());
+}
+
+bool MainUi::hasPresetSlot(int slot) const {
+  return std::find(presetSlots_.begin(), presetSlots_.end(), slot) !=
+         presetSlots_.end();
+}
+
+std::string MainUi::presetPath(int slot) const {
+  return (fs::path(presetDirectory_) / ("slot_" + std::to_string(slot) +
+                                        ".csv"))
+      .string();
+}
+
+bool MainUi::savePreset(int slot,
+                        const std::vector<ff::RodTarget> &targets) {
+  std::ofstream output(presetPath(slot), std::ios::trunc);
+  if (!output)
+    return false;
+  output << "channel,rod,position,velocity\n";
+  for (const auto &target : targets)
+    output << static_cast<int>(target.address.channel) << ','
+           << static_cast<int>(target.address.rod) << ',' << target.position
+           << ',' << target.velocity << '\n';
+  return static_cast<bool>(output);
+}
+
+std::vector<ff::RodTarget> MainUi::loadPreset(int slot) const {
+  std::ifstream input(presetPath(slot));
+  std::vector<ff::RodTarget> targets;
+  std::string line;
+  std::getline(input, line); // CSV header
+  while (std::getline(input, line)) {
+    std::istringstream row(line);
+    std::string channelText, rodText, positionText, velocityText;
+    if (!std::getline(row, channelText, ',') || !std::getline(row, rodText, ',') ||
+        !std::getline(row, positionText, ',') || !std::getline(row, velocityText))
+      return {};
+    try {
+      const auto channel = std::stoi(channelText);
+      const auto rod = std::stoi(rodText);
+      const auto position = std::stoi(positionText);
+      const auto velocity = std::stod(velocityText);
+      if (channel < 0 || channel > 2 || rod < 0 || rod > 255)
+        return {};
+      targets.push_back({{static_cast<ff::ChannelId>(channel),
+                          static_cast<ff::RodId>(rod)},
+                         position, velocity});
+    } catch (const std::exception &) {
+      return {};
+    }
+  }
+  return targets;
 }
 
 void MainUi::loadUiSettings() {
@@ -134,7 +213,6 @@ void MainUi::ensureConfig() {
                                enabledChannelCount_);
   configLoaded_ = static_cast<bool>(x);
   targetsInitialized_ = false;
-  plan_ = {};
   if (!x)
     notice_ = x.message;
 }
@@ -228,24 +306,20 @@ void MainUi::welcome() {
 }
 void MainUi::dashboard() {
   auto s = service_.status();
-  ImGui::Text("FF GUI 1.0.0   |   Mode: %s",
-              simulation_ ? "Simulation" : "Real");
-
-  if (ImGui::Button(service_.connected() ? "Disconnect" : "Connect")) {
-    auto x = service_.connected() ? service_.disconnect() : service_.connect();
-    if (!x)
-      notice_ = x.message;
-  }
+  ImGui::Text("RS485 is connected.  Mode: %s",
+              simulation_ ? "Simulation" : "Real Hardware");
   ImGui::SameLine();
-  if (ImGui::Button("Refresh Status")) {
-    auto x = service_.refresh();
+  if (ImGui::Button("close")) {
+    auto x = service_.disconnect();
     if (!x)
       notice_ = x.message;
+    targetsInitialized_ = false;
+    return;
   }
   ImGui::SameLine();
   if (ImGui::Button("EMERGENCY STOP"))
     service_.emergencyStop();
-  ImGui::Separator();
+
   if (ImGui::BeginTabBar("channels")) {
     for (int i = 0; i < service_.activeChannelCount(); i++) {
       const std::string label = "CH" + std::to_string(i + 1);
@@ -257,7 +331,7 @@ void MainUi::dashboard() {
     }
     ImGui::EndTabBar();
   }
-  ImGui::SeparatorText("Targets and Planning");
+  ImGui::SeparatorText("Control");
   if (!targetsInitialized_ && service_.connected()) {
     targets_.clear();
     for (int i = 0; i < service_.activeChannelCount(); i++) {
@@ -270,11 +344,75 @@ void MainUi::dashboard() {
     }
     targetsInitialized_ = true;
   }
+
+  int highestSlot = -1;
+  if (!presetSlots_.empty())
+    highestSlot = presetSlots_.back();
+  const int newSlot = highestSlot + 1;
+  const auto selectedSlotLabel = "Slot " + std::to_string(selectedPresetSlot_);
+  ImGui::SetNextItemWidth(120.0f);
+  if (ImGui::BeginCombo("Position Slot", selectedSlotLabel.c_str())) {
+    for (int slot : presetSlots_) {
+      const auto label = "Slot " + std::to_string(slot);
+      if (ImGui::Selectable(label.c_str(), selectedPresetSlot_ == slot))
+        selectedPresetSlot_ = slot;
+    }
+    const auto newSlotLabel = "Slot " + std::to_string(newSlot) + " (new)";
+    if (ImGui::Selectable(newSlotLabel.c_str(), selectedPresetSlot_ == newSlot))
+      selectedPresetSlot_ = newSlot;
+    ImGui::EndCombo();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("save")) {
+    auto refreshed = service_.refresh();
+    auto current = service_.status();
+    bool safe = static_cast<bool>(refreshed);
+    for (int i = 0; i < service_.activeChannelCount(); ++i)
+      safe = safe && current.safety[i].state == ff::SafetyState::Safe;
+    if (!safe) {
+      notice_ = refreshed ? "Current positions are unsafe; preset was not saved."
+                          : refreshed.message;
+    } else {
+      std::vector<ff::RodTarget> preset;
+      for (int i = 0; i < service_.activeChannelCount(); ++i) {
+        const auto &channel = current.channels[i];
+        for (size_t rod = 0; rod < channel.rods.size(); ++rod)
+          preset.push_back({{static_cast<ff::ChannelId>(i),
+                             static_cast<ff::RodId>(rod)},
+                            channel.rods[rod].actualPosition, 100.0});
+      }
+      if (savePreset(selectedPresetSlot_, preset)) {
+        targets_ = std::move(preset);
+        refreshPresetSlots();
+        notice_ = "Positions saved to slot " +
+                  std::to_string(selectedPresetSlot_) + ".";
+      } else {
+        notice_ = "Could not write the position preset file.";
+      }
+    }
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!hasPresetSlot(selectedPresetSlot_));
+  if (ImGui::Button("load")) {
+    auto preset = loadPreset(selectedPresetSlot_);
+    if (preset.empty()) {
+      notice_ = "The selected position preset is invalid or empty.";
+    } else {
+      auto x = service_.setRodTargets(preset);
+      if (x) {
+        targets_ = std::move(preset);
+        notice_ = "Position slot " + std::to_string(selectedPresetSlot_) +
+                  " loaded.";
+      } else {
+        notice_ = x.message + "; restored to the current safe positions.";
+      }
+    }
+  }
+  ImGui::EndDisabled();
+
   for (auto &r : targets_) {
     if (static_cast<int>(r.address.channel) != activeChannel_)
       continue;
-    const auto rodIndex = static_cast<size_t>(r.address.rod);
-    const auto &current = s.channels[activeChannel_].rods[rodIndex];
     const auto config = service_.rodConfig(r.address);
     if (!config || std::abs(config->p1) < 1e-12)
       continue;
@@ -294,50 +432,29 @@ void MainUi::dashboard() {
                                     toOpticalPosition(config->softMax)));
     float targetMm = static_cast<float>(toOpticalPosition(r.position));
 
-    const float targetColumnX = ImGui::GetCursorPosX() + 175.0f;
-    ImGui::Text("Rod %2d | Actual: %7.3f%s", r.address.rod,
-                toOpticalPosition(current.actualPosition),
-                current.alarm ? "  ALARM" : "");
-    ImGui::SameLine(targetColumnX);
-    ImGui::SetNextItemWidth(360.0f);
-    if (ImGui::SliderFloat(("Target##CH" +
-                            std::to_string(int(r.address.channel) + 1) + "R" +
-                            std::to_string(r.address.rod))
-                               .c_str(),
-                           &targetMm, minimumMm, maximumMm, "%.3f")) {
+    ImGui::SetNextItemWidth(520.0f);
+    if (ImGui::SliderFloat(("stroke" + std::to_string(r.address.rod) +
+                            "##CH" +
+                            std::to_string(int(r.address.channel) + 1)).c_str(),
+                           &targetMm, minimumMm, maximumMm, "%.3f mm")) {
+      const auto previousPosition = r.position;
       r.position =
           std::clamp(toEncoder(targetMm), config->softMin, config->softMax);
+      auto x = service_.setRodTarget(r);
+      if (!x) {
+        r.position = previousPosition;
+        targetMm = static_cast<float>(toOpticalPosition(previousPosition));
+        notice_ = x.message + "; restored to the previous safe position.";
+      } else {
+        notice_.clear();
+      }
     }
   }
-  if (ImGui::Button("Preview Plan")) {
-    auto x = service_.previewPlan({targets_, false});
-    if (x)
-      plan_ = x.value;
-    else
-      notice_ = x.message;
-  }
-  ImGui::SameLine();
-  ImGui::BeginDisabled(!plan_.valid);
-  if (ImGui::Button("Execute Plan")) {
-    auto x = service_.executePlan(plan_);
-    if (!x)
-      notice_ = x.message;
-  }
-  ImGui::EndDisabled();
-  if (plan_.valid)
-    ImGui::Text("Plan #%llu: %s, %zu steps", (unsigned long long)plan_.id,
-                plan_.message.c_str(), plan_.steps.size());
   if (!notice_.empty())
     ImGui::TextColored(ImVec4(1, 0.5f, 0.2f, 1), "%s", notice_.c_str());
 }
 void MainUi::drawChannel(int index, const ff::FFStatus &s) {
   auto &c = s.channels[index];
-  ImGui::Text("CH%d  %s", index + 1, c.connected ? "Connected" : "Offline");
-  auto &safe = s.safety[index];
-  ImVec4 col = safe.state == ff::SafetyState::Safe ? ImVec4(0.2f, 0.9f, 0.3f, 1)
-                                                   : ImVec4(1, 0.3f, 0.2f, 1);
-  ImGui::TextColored(col, "Safety: %s",
-                     safe.state == ff::SafetyState::Safe ? "SAFE" : "UNSAFE");
-  ImGui::TextDisabled("Real-time positions and targets are listed below.");
+  ImGui::Text("CH%d: %zu configured device(s)", index + 1, c.rods.size());
 }
 } // namespace ff_gui

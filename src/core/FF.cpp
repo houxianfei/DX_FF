@@ -167,9 +167,13 @@ validateLayerClearance(const FFChannelConfig &channel,
     const auto *secondConfig = findRodConfig(channel, second);
     const double firstMm = opticalPosition(*firstConfig, firstPosition);
     const double secondMm = opticalPosition(*secondConfig, secondPosition);
-    if (std::abs(firstMm - secondMm) < clearance)
+    // member.rightNeighbor is ordered topology: the right Rod must remain to
+    // the right of this (left) Rod by at least the configured separation.
+    // Do not use abs() here: it would discard that order and would make a
+    // negative separation rule meaningless.
+    if (secondMm - firstMm < clearance)
       return Result<void>::failure(ErrorCode::SafetyViolation,
-                                   "Layer neighbor clearance is violated");
+                                   "Layer neighbor order or clearance is violated");
   }
   return Result<void>::success();
 }
@@ -439,6 +443,13 @@ const std::vector<std::unique_ptr<Rod>> &Controller::rods() const noexcept {
 }
 Result<void> Controller::connect() {
   std::lock_guard l(ioMutex_);
+  std::vector<RodConfig> configs;
+  configs.reserve(rods_.size());
+  for (const auto &rod : rods_)
+    configs.push_back(rod->config());
+  auto configured = backend_->configureRods(configs);
+  if (!configured)
+    return configured;
   return backend_->open(config_.serial);
 }
 Result<void> Controller::disconnect() {
@@ -629,7 +640,18 @@ Result<void> FF::connect() {
     }
   }
   state_ = FFState::Ready;
-  return refreshStatus();
+  auto refreshed = refreshStatus();
+  if (!refreshed)
+    return refreshed;
+  const auto current = status();
+  for (const auto &safety : current.safety) {
+    if (safety.state != SafetyState::Safe) {
+      disconnect();
+      return Result<void>::failure(ErrorCode::SafetyViolation,
+                                   "Initial motor positions are unsafe");
+    }
+  }
+  return Result<void>::success();
 }
 Result<void> FF::disconnect() {
   for (auto &c : channels_)
@@ -659,6 +681,12 @@ ChannelSafetyStatus FF::channelSafety(ChannelId id) const {
                      : ChannelSafetyStatus{};
 }
 Result<MotionReceipt> FF::submitMotion(const MotionRequest &r) {
+  // Safety boundaries depend on the actual positions of neighboring Rods.
+  // Refresh every configured Rod before validating so callers cannot make a
+  // decision from stale cached feedback.
+  auto refreshed = refreshStatus();
+  if (!refreshed)
+    return Result<MotionReceipt>::failure(refreshed.error, refreshed.message);
   auto v = validateMotion(r);
   if (!v)
     return Result<MotionReceipt>::failure(v.error, v.message);

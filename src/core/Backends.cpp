@@ -1,12 +1,12 @@
 #include "ff/FF.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#ifdef _WIN32
 #include "CppDllMightyZap_Ver2010.h"
 #include <windows.h>
-#endif
 
 namespace ff {
 class SimulatedControllerBackend final : public IControllerBackend {
@@ -15,6 +15,35 @@ class SimulatedControllerBackend final : public IControllerBackend {
   std::unordered_map<RodId, RodStatus> rods_;
 
 public:
+  Result<void> configureRods(const std::vector<RodConfig> &configs) override {
+    std::vector<RodConfig> ordered = configs;
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto &a, const auto &b) { return a.id < b.id; });
+    rods_.clear();
+    const auto now = std::chrono::steady_clock::now();
+    for (size_t index = 0; index < ordered.size(); ++index) {
+      const auto &config = ordered[index];
+      const auto minimum = (std::max)(config.hardMin, config.softMin);
+      const auto maximum = (std::min)(config.hardMax, config.softMax);
+      if (minimum > maximum)
+        return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                     "Simulation Rod has no legal position");
+      const double fraction = ordered.size() <= 1
+                                  ? 0.5
+                                  : static_cast<double>(index) /
+                                        static_cast<double>(ordered.size() - 1);
+      const auto position = static_cast<int32_t>(std::lround(
+          minimum + (maximum - minimum) * fraction));
+      auto &status = rods_[config.id];
+      status.actualPosition = position;
+      status.targetPosition = position;
+      status.positionValid = true;
+      status.enabled = true;
+      status.state = RodState::Idle;
+      status.updateTime = now;
+    }
+    return Result<void>::success();
+  }
   Result<void> open(const SerialConfig &) override {
     open_ = true;
     return Result<void>::success();
@@ -63,8 +92,8 @@ public:
       return Result<RodStatus>::failure(ErrorCode::NotConnected);
     auto &s = rods_[id];
     if (!s.positionValid) {
-      s.actualPosition = 80;
-      s.targetPosition = 80;
+      s.actualPosition = 0;
+      s.targetPosition = 0;
       s.enabled = true;
       s.state = RodState::Idle;
     }

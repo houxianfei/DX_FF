@@ -82,6 +82,20 @@ Result<void> FFApplicationService::refresh() {
     impl_->callback(impl_->machine->status());
   return x;
 }
+Result<void> FFApplicationService::setRodTarget(const RodTarget &target) {
+  return setRodTargets({target});
+}
+Result<void>
+FFApplicationService::setRodTargets(const std::vector<RodTarget> &targets) {
+  std::lock_guard l(impl_->mutex);
+  if (!impl_->machine || !impl_->connected)
+    return Result<void>::failure(ErrorCode::NotConnected);
+  // Both simulated and physical backends must go through FF::submitMotion().
+  // This is where shared limit, topology, and layer-clearance checks run.
+  auto x = impl_->machine->submitMotion({targets, false});
+  return x ? Result<void>::success()
+           : Result<void>::failure(x.error, x.message);
+}
 Result<MotionPlan> FFApplicationService::previewPlan(const MotionRequest &r) {
   std::lock_guard l(impl_->mutex);
   if (!impl_->machine)

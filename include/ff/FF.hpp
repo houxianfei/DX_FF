@@ -258,6 +258,11 @@ public:
   virtual Result<void> open(const SerialConfig &) = 0;
   virtual Result<void> close() = 0;
   virtual bool isOpen() const noexcept = 0;
+  // Simulation uses the configured Rods to construct a valid initial state.
+  // Physical backends may ignore this hook.
+  virtual Result<void> configureRods(const std::vector<RodConfig> &) {
+    return Result<void>::success();
+  }
   virtual Result<void> setGoal(RodId, std::int32_t, double) = 0;
   // Must use the controller/bus synchronous-write facility when available.
   virtual Result<void> setGoalsSynchronous(const std::vector<RodTarget> &) = 0;
@@ -423,6 +428,11 @@ public:
   Result<void> connect();
   Result<void> disconnect();
   Result<void> refresh();
+  // Demo-style single-Rod control. The target is fully validated by the FF
+  // safety layer before it is sent to either backend.
+  Result<void> setRodTarget(const RodTarget &);
+  // Validates the complete target set before any backend command is sent.
+  Result<void> setRodTargets(const std::vector<RodTarget> &);
   Result<MotionPlan> previewPlan(const MotionRequest &);
   Result<void> executePlan(const MotionPlan &);
   Result<void> cancelMotion();
