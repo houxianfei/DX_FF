@@ -1,2 +1,2 @@
-machine_id,config_version,max_active_rod_count,status_expiration_ms
-FF-001,FF-CONFIG-0.1,8,200
+﻿machine_id,config_version,max_active_rod_count,status_expiration_ms
+FF-001,FF-CONFIG-1.1,40,200

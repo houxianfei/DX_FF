@@ -72,17 +72,19 @@ JSON 示例：
           "zero_position": 2048,
           "safe_position": 3900,
           "safe_position_valid": true,
-          "stroke_slope": 1.0,
-          "stroke_bias": 0.0,
+          "P0": 0.0,
+          "P1": 0.021978021978,
           "inward_direction": 1,
           "max_velocity": 300.0,
           "max_acceleration": 100.0,
           "max_deceleration": 100.0,
           "position_tolerance": 5,
           "stable_time_ms": 100,
-          "move_timeout_ms": 5000,
-          "layer_mask": 1
+          "move_timeout_ms": 5000
         }
+      ],
+      "layer_members": [
+        { "rod_id": 0, "layer": 1, "role": 3, "left_neighbor": -1, "right_neighbor": -1 }
       ]
     },
     { "id": "CH2", "controller": { "name": "CTRL-CH2", "serial": { "port": "COM4", "baud_rate": 115200, "timeout_ms": 500 } }, "rods": [] },
@@ -92,6 +94,8 @@ JSON 示例：
 ```
 
 字段采用 `snake_case`；Channel ID 使用 `CH1`、`CH2`、`CH3`，Rod ID 是控制器内整数地址。不同 Channel 可以重复使用相同 Rod ID。
+
+层拓扑采用 `layer_members`。每条记录只表示一根 Rod 在一个普通整数 layer 中的成员关系；同一 Rod 跨层时写多条记录，并为每条记录单独提供邻居关系。
 
 ## 4. SDK 后端适配
 

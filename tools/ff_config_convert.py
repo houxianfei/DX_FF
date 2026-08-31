@@ -14,15 +14,15 @@ SYSTEM_FIELDS = ("machine_id", "config_version", "max_active_rod_count", "status
 CHANNEL_FIELDS = ("channel_id", "controller_name", "port", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count")
 ROD_FIELDS = (
     "channel_id", "rod_id", "name", "hard_min", "hard_max", "soft_min", "soft_max",
-    "zero_position", "safe_position", "safe_position_valid", "stroke_slope", "stroke_bias",
+    "zero_position", "safe_position", "safe_position_valid", "P0", "P1",
     "inward_direction", "max_velocity", "max_acceleration", "max_deceleration",
-    "position_tolerance", "stable_time_ms", "move_timeout_ms", "layer_mask",
+    "position_tolerance", "stable_time_ms", "move_timeout_ms",
 )
 ROD_LAYER_FIELDS = ("channel_id", "rod_id", "layer", "role", "left_neighbor", "right_neighbor")
 RANGE_FIELDS = ("channel_id", "rod_id", "range_kind", "min_position", "max_position")
-PAIR_FIELDS = ("channel_id", "rod_a", "rod_b", "minimum_clearance_mm")
-INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "rod_id", "rod_a", "rod_b", "layer", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "layer_mask", "min_position", "max_position"}
-FLOAT_FIELDS = {"stroke_slope", "stroke_bias", "max_velocity", "max_acceleration", "max_deceleration", "minimum_clearance_mm"}
+PAIR_FIELDS = ("channel_id", "layer", "rod_a", "rod_b", "minimum_clearance_mm")
+INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "rod_id", "rod_a", "rod_b", "layer", "role", "left_neighbor", "right_neighbor", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "min_position", "max_position"}
+FLOAT_FIELDS = {"P0", "P1", "max_velocity", "max_acceleration", "max_deceleration", "minimum_clearance_mm"}
 BOOL_FIELDS = {"safe_position_valid"}
 
 
@@ -102,6 +102,25 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{cid}/Rod{rid}: 软件限位不在硬限位内")
             if rod.get("safe_position_valid") and not (rod.get("soft_min", 0) <= rod.get("safe_position", 0) <= rod.get("soft_max", 0)):
                 errors.append(f"{cid}/Rod{rid}: safe_position 超出软件限位")
+        memberships = ch.get("layer_members", [])
+        seen_memberships: set[tuple[int, int]] = set()
+        by_member = {(item.get("layer"), item.get("rod_id")): item for item in memberships}
+        for item in memberships:
+            layer, rid = item.get("layer"), item.get("rod_id")
+            if not isinstance(layer, int) or not isinstance(rid, int) or rid not in seen_rods:
+                errors.append(f"{cid}: layer member 非法: layer={layer}, rod={rid}")
+                continue
+            if (layer, rid) in seen_memberships:
+                errors.append(f"{cid}: 同一 Rod 在同一 layer 重复: layer={layer}, rod={rid}")
+            seen_memberships.add((layer, rid))
+            role, left, right = item.get("role"), item.get("left_neighbor"), item.get("right_neighbor")
+            has_left, has_right = left is not None and left >= 0, right is not None and right >= 0
+            if role not in (0, 1, 2, 3) or (role == 0 and not (has_left and has_right)) or (role == 1 and (has_left or not has_right)) or (role == 2 and (not has_left or has_right)) or (role == 3 and (has_left or has_right)):
+                errors.append(f"{cid}/layer {layer}/Rod{rid}: role 与 neighbor 不一致")
+            if has_left and by_member.get((layer, left), {}).get("right_neighbor") != rid:
+                errors.append(f"{cid}/layer {layer}/Rod{rid}: left_neighbor 不互反")
+            if has_right and by_member.get((layer, right), {}).get("left_neighbor") != rid:
+                errors.append(f"{cid}/layer {layer}/Rod{rid}: right_neighbor 不互反")
     if seen_channels != set(CHANNELS):
         errors.append("Channel 集合必须为 CH1、CH2、CH3")
     return errors
@@ -127,7 +146,7 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
             "serial": {"port": required(row, "port", "channels.csv"), "baud_rate": row["baud_rate"], "timeout_ms": row["timeout_ms"]},
             "poll_period_ms": row["poll_period_ms"], "retry_count": row["retry_count"],
         }
-        channels.append({"id": cid, "controller": controller, "rods": []})
+        channels.append({"id": cid, "controller": controller, "layer_members": [], "clearance_rules": [], "rods": []})
     by_channel = {ch["id"]: ch for ch in channels}
     for row in rod_rows:
         cid = required(row, "channel_id", "rods.csv")
@@ -143,7 +162,7 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
     for row in layer_rows:
         ch = by_channel.get(row.get("channel_id"));
         if ch is None: fail(f"rod_layers.csv 引用了不存在的 Channel: {row.get('channel_id')}")
-        ch.setdefault("layers", []).append({"layer": row["layer"], "rod_id": row["rod_id"], "role": row["role"], "left_neighbor": row["left_neighbor"], "right_neighbor": row["right_neighbor"]})
+        ch["layer_members"].append({"layer": row["layer"], "rod_id": row["rod_id"], "role": row["role"], "left_neighbor": row["left_neighbor"], "right_neighbor": row["right_neighbor"]})
     for row in range_rows:
         ch = by_channel.get(row.get("channel_id"));
         if ch is None: fail(f"safety_ranges.csv 引用了不存在的 Channel: {row.get('channel_id')}")
@@ -153,7 +172,7 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
     for row in pair_rows:
         ch = by_channel.get(row.get("channel_id"));
         if ch is None: fail(f"pair_clearance_rules.csv 引用了不存在的 Channel: {row.get('channel_id')}")
-        ch.setdefault("clearance_rules", []).append({"rod_a": row["rod_a"], "rod_b": row["rod_b"], "minimum_clearance_mm": row["minimum_clearance_mm"]})
+        ch["clearance_rules"].append({"layer": row["layer"], "rod_a": row["rod_a"], "rod_b": row["rod_b"], "minimum_clearance_mm": row["minimum_clearance_mm"]})
     config = {"schema": "ff-config", "schema_version": 2, "machine_id": required(system, "machine_id", "system.csv"), "config_version": required(system, "config_version", "system.csv"), "max_active_rod_count": system["max_active_rod_count"], "status_expiration_ms": system["status_expiration_ms"], "channels": channels}
     errors = validate_config(config)
     if errors:
@@ -185,10 +204,10 @@ def json_to_csv(config: dict[str, Any], directory: Path) -> None:
         for rod in ch.get("rods", []):
             row = {"channel_id": ch["id"], "rod_id": rod.get("id", ""), **rod}
             rods.append(row)
-        for layer in ch.get("layers", []): layers.append({"channel_id": ch["id"], **layer})
+        for member in ch.get("layer_members", []): layers.append({"channel_id": ch["id"], **member})
         for rod in ch.get("rods", []):
             for item in rod.get("safety_ranges", []): ranges.append({"channel_id": ch["id"], "rod_id": rod.get("id", ""), "range_kind": item.get("kind", ""), "min_position": item.get("min", ""), "max_position": item.get("max", "")})
-        for item in ch.get("clearance_rules", []): pairs.append({"channel_id": ch["id"], "rod_a": item.get("rod_a", ""), "rod_b": item.get("rod_b", ""), "minimum_clearance_mm": item.get("minimum_clearance_mm", "")})
+        for item in ch.get("clearance_rules", []): pairs.append({"channel_id": ch["id"], "layer": item.get("layer", ""), "rod_a": item.get("rod_a", ""), "rod_b": item.get("rod_b", ""), "minimum_clearance_mm": item.get("minimum_clearance_mm", "")})
     write_csv(directory / "channels.csv", CHANNEL_FIELDS, channels)
     write_csv(directory / "rods.csv", ROD_FIELDS, rods)
     write_csv(directory / "rod_layers.csv", ROD_LAYER_FIELDS, layers)
