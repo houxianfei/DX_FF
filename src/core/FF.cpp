@@ -5,6 +5,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_set>
 
 namespace ff {
@@ -179,6 +180,62 @@ validateLayerClearance(const FFChannelConfig &channel,
 }
 } // namespace
 
+Result<void> FFConfigIO::validate(const FFConfig &config) {
+  if (config.machineId.empty() || config.configVersion.empty())
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                 "Machine ID and configuration version are required");
+  std::unordered_set<std::string> ports;
+  std::size_t rodCount = 0;
+  for (int i = 0; i < 3; ++i) {
+    const auto &channel = config.channels[i];
+    if (static_cast<int>(channel.id) != i)
+      return Result<void>::failure(ErrorCode::MissingChannel,
+                                   "Configuration must contain CH1, CH2 and CH3");
+    if (channel.controller.serial.portName.empty() ||
+        !ports.insert(channel.controller.serial.portName).second)
+      return Result<void>::failure(ErrorCode::DuplicatePort,
+                                   "Controller serial ports must be non-empty and unique");
+    std::unordered_set<int> ids;
+    for (const auto &rod : channel.rods) {
+      ++rodCount;
+      if (!ids.insert(static_cast<int>(rod.id)).second)
+        return Result<void>::failure(ErrorCode::DuplicateId, "Duplicate Rod ID");
+      if (rod.hardMin > rod.hardMax || rod.softMin < rod.hardMin ||
+          rod.softMax > rod.hardMax || rod.softMin > rod.softMax ||
+          (rod.safePositionValid && (rod.safePosition < rod.softMin ||
+                                     rod.safePosition > rod.softMax)) ||
+          std::abs(rod.p1) < 1e-12 || rod.maxVelocity < 0 ||
+          rod.maxAcceleration < 0 || rod.maxDeceleration < 0 ||
+          rod.positionTolerance < 0 || rod.stableTime.count() < 0 ||
+          rod.moveTimeout.count() < 0)
+        return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                     "Invalid Rod limits, calibration, or motion parameter");
+      for (const auto &range : rod.absoluteSafeRanges)
+        if (range.first > range.second || range.first < rod.hardMin || range.second > rod.hardMax)
+          return Result<void>::failure(ErrorCode::InvalidConfiguration, "Invalid absolute safe range");
+      for (const auto &range : rod.forbiddenRanges)
+        if (range.first > range.second || range.first < rod.hardMin || range.second > rod.hardMax)
+          return Result<void>::failure(ErrorCode::InvalidConfiguration, "Invalid forbidden range");
+    }
+    if (auto topology = validateLayerTopology(channel); !topology)
+      return topology;
+    std::set<std::tuple<int, int, int>> rules;
+    for (const auto &rule : channel.clearanceRules) {
+      if (!findRodConfig(channel, rule.first) || !findRodConfig(channel, rule.second) ||
+          rule.first == rule.second || !std::isfinite(rule.minimumClearanceMm) ||
+          !rules.insert({rule.layer, std::min(int(rule.first), int(rule.second)),
+                         std::max(int(rule.first), int(rule.second))}).second)
+        return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                     "Invalid or duplicate clearance rule");
+    }
+  }
+  if (config.maxActiveRodCount == 0 || config.maxActiveRodCount < rodCount ||
+      config.statusExpiration.count() < 0)
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                 "Invalid system limits");
+  return Result<void>::success();
+}
+
 Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
   auto text = readFile(fileName);
   if (text.empty())
@@ -289,10 +346,16 @@ Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
     return Result<FFConfig>::failure(
         ErrorCode::MissingChannel,
         "Configuration must contain CH1, CH2 and CH3");
+  auto valid = validate(c);
+  if (!valid)
+    return Result<FFConfig>::failure(valid.error, valid.message);
   return Result<FFConfig>::success(std::move(c));
 }
 
 Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
+  auto valid = validate(c);
+  if (!valid)
+    return valid;
   std::ofstream f(fileName);
   if (!f)
     return Result<void>::failure(ErrorCode::BackendFailure,

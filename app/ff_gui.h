@@ -7,6 +7,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 #include "implot.h"
+#include "ImGuiFileDialog.h"
 
 namespace ff_gui {
 class MainUi {
@@ -30,6 +31,17 @@ private:
   int activeChannel_{0};
   int selectedPresetSlot_{0};
   std::vector<int> presetSlots_;
+  bool showParameters_{false};
+  bool parametersInitialized_{false};
+  bool parametersDirty_{false};
+  int parameterChannel_{0};
+  int selectedRod_{0};
+  int selectedLayerMember_{0};
+  int selectedClearanceRule_{0};
+  ff::FFConfig parameterOriginal_{};
+  ff::FFConfig parameterDraft_{};
+  std::string parameterNotice_;
+  std::string pendingLoadPath_;
   void ensureConfig();
   void loadUiSettings();
   void saveUiSettings() const;
@@ -42,5 +54,10 @@ private:
   void welcome();
   void dashboard();
   void drawChannel(int index, const ff::FFStatus &status);
+  void parameters();
+  void initializeParameters();
+  bool saveParameterFile(const std::string &path);
+  bool loadParameterFile(const std::string &path);
+  void markParametersDirty();
 };
 } // namespace ff_gui

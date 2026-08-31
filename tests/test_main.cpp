@@ -6,6 +6,7 @@ static FFConfig cfg() {
   FFConfig c;
   c.machineId = "test";
   c.configVersion = "v1";
+  c.maxActiveRodCount = 3;
   for (int i = 0; i < 3; i++) {
     auto &ch = c.channels[i];
     ch.id = static_cast<ChannelId>(i);
@@ -30,6 +31,13 @@ int main() {
   assert(loaded.value.channels[1].rods.size() == 14);
   assert(loaded.value.channels[2].rods.size() == 12);
   auto c = cfg();
+  assert(FFConfigIO::validate(c));
+  auto invalidConfig = c;
+  invalidConfig.channels[0].rods[0].softMin = -1;
+  assert(!FFConfigIO::validate(invalidConfig));
+  invalidConfig = c;
+  invalidConfig.channels[0].rods.push_back(invalidConfig.channels[0].rods[0]);
+  assert(!FFConfigIO::validate(invalidConfig));
   std::array<std::unique_ptr<IControllerBackend>, 3> b;
   for (auto &i : b)
     i = makeSimulationBackend();
@@ -104,5 +112,11 @@ int main() {
   auto bad = f.submitMotion(badReq);
   assert(!bad);
   assert(f.emergencyStop());
+  FFApplicationService service;
+  assert(service.applyConfig(c, true, {"", "", ""}));
+  assert(service.connect());
+  assert(!service.applyConfig(c, true, {"", "", ""}));
+  assert(service.disconnect());
+  assert(service.applyConfig(c, true, {"", "", ""}));
   std::cout << "FF tests passed\n";
 }

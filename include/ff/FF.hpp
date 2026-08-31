@@ -249,6 +249,7 @@ public:
   // implemented in .cpp so the public header has no JSON dependency.
   static Result<FFConfig> load(const std::string &fileName);
   static Result<void> save(const std::string &fileName, const FFConfig &config);
+  static Result<void> validate(const FFConfig &config);
 };
 
 // Adapter implemented in .cpp using CppDllMightyZap_Ver2010.h.
@@ -425,6 +426,11 @@ public:
   Result<void> loadConfig(const std::string &fileName, bool simulation,
                           const std::array<std::string, 3> &serialPorts,
                           int activeChannelCount = 3);
+  // Replaces the disconnected runtime instance with a validated configuration.
+  // Runtime serial-port choices are applied in exactly the same way as loadConfig.
+  Result<void> applyConfig(const FFConfig &config, bool simulation,
+                           const std::array<std::string, 3> &serialPorts,
+                           int activeChannelCount = 3);
   Result<void> connect();
   Result<void> disconnect();
   Result<void> refresh();
@@ -446,6 +452,9 @@ public:
   void setStatusCallback(StatusCallback);
 
 private:
+  Result<void> replaceMachine(FFConfig config, bool simulation,
+                              const std::array<std::string, 3> &serialPorts,
+                              int activeChannelCount);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
