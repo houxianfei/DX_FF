@@ -3,6 +3,7 @@
 #include <windows.h>
 #pragma comment(lib, "d3d11.lib")
 #include "ff/FF.hpp"
+#include "ff/Training.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -32,6 +33,7 @@ private:
   int selectedPresetSlot_{0};
   std::vector<int> presetSlots_;
   bool showParameters_{false};
+  bool showTraining_{false};
   bool parametersInitialized_{false};
   bool parametersDirty_{false};
   int parameterChannel_{0};
@@ -42,6 +44,22 @@ private:
   ff::FFConfig parameterDraft_{};
   std::string parameterNotice_;
   std::string pendingLoadPath_;
+  std::string trainingDirectory_;
+  std::string trainingNotice_;
+  ff::TrainingSession training_{};
+  std::array<ff::TrainingSession, 3> trainingSessions_{};
+  std::vector<ff::RodTarget> trainingExecutionTargets_;
+  std::optional<ff::RodTarget> trainingEvasionTarget_;
+  bool trainingScanning_{false};
+  bool trainingMovePending_{false};
+  double trainingNextMm_{0.0};
+  std::optional<std::chrono::steady_clock::time_point> trainingStableSince_;
+  std::array<bool, 3> trainingRangeInitialized_{};
+  int trainingDraggingCandidate_{-1};
+  double trainingDragOriginalMm_{0.0};
+  double trainingDragLastSafeMm_{0.0};
+  bool trainingForbiddenDirty_{true};
+  std::vector<std::pair<double, double>> trainingForbiddenBands_;
   void ensureConfig();
   void loadUiSettings();
   void saveUiSettings() const;
@@ -55,6 +73,12 @@ private:
   void dashboard();
   void drawChannel(int index, const ff::FFStatus &status);
   void parameters();
+  void training();
+  void tickTrainingScan();
+  void resetTrainingMeasurement();
+  bool updateTrainingAssignment();
+  bool candidateSetIsLegal(const std::vector<double> &, std::string *reason = nullptr) const;
+  void refreshTrainingForbiddenBands();
   void initializeParameters();
   bool saveParameterFile(const std::string &path);
   bool loadParameterFile(const std::string &path);

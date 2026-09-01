@@ -7,6 +7,7 @@
 #include <sstream>
 #include <tuple>
 #include <unordered_set>
+#include "Training.cpp"
 
 namespace ff {
 namespace {
@@ -217,6 +218,21 @@ Result<void> FFConfigIO::validate(const FFConfig &config) {
         if (range.first > range.second || range.first < rod.hardMin || range.second > rod.hardMax)
           return Result<void>::failure(ErrorCode::InvalidConfiguration, "Invalid forbidden range");
     }
+    if (channel.trainingRod) {
+      if (!findRodConfig(channel, *channel.trainingRod))
+        return Result<void>::failure(
+            ErrorCode::InvalidConfiguration,
+            "Training Rod references an unknown Rod");
+      const bool isLayer2 = std::any_of(
+          channel.layerMembers.begin(), channel.layerMembers.end(),
+          [&](const LayerMembership &member) {
+            return member.layer == 2 && member.rod == *channel.trainingRod;
+          });
+      if (!isLayer2)
+        return Result<void>::failure(
+            ErrorCode::InvalidConfiguration,
+            "Training Rod must be a Layer 2 Rod");
+    }
     if (auto topology = validateLayerTopology(channel); !topology)
       return topology;
     std::set<std::tuple<int, int, int>> rules;
@@ -270,6 +286,11 @@ Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
         std::chrono::milliseconds(intField(block, "poll_period_ms", 20));
     c.channels[idx].controller.retryCount =
         static_cast<uint32_t>(intField(block, "retry_count", 3));
+    const int configuredTrainingRod =
+        static_cast<int>(intField(block, "training_rod_id", -1));
+    if (configuredTrainingRod >= 0 && configuredTrainingRod <= 255)
+      c.channels[idx].trainingRod =
+          static_cast<RodId>(configuredTrainingRod);
     // layer_members is intentionally written before rods so it is included in
     // this channel block. A Rod may appear once for each ordinary layer.
     std::regex layerArray("\\\"layer_members\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]");
@@ -381,6 +402,10 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
       << ",\n"
       << "        \"retry_count\": " << ch.controller.retryCount
       << "\n      },\n"
+      << "      \"training_rod_id\": "
+      << (ch.trainingRod ? std::to_string(int(*ch.trainingRod))
+                         : std::string("null"))
+      << ",\n"
       << "      \"layer_members\": [\n";
     for (size_t j = 0; j < ch.layerMembers.size(); ++j) {
       const auto &member = ch.layerMembers[j];

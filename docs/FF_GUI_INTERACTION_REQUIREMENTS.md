@@ -23,6 +23,7 @@ This document records the product interaction rules for the FF GUI and is part o
 - Main UI contains normal operations, status monitoring, channel selection, target editing, planning and emergency stop.
 - Rod positions are displayed and edited as `optical_position`. The first-release conversion is `optical_position = P0 + P1 * u`, where `u` is the encoder position and `P0`/`P1` are per-Rod JSON configuration values. Legacy `stroke_bias` and `stroke_slope` fields remain readable as P0/P1.
 - `rod_layers.csv` uses one row for each `(channel_id, rod_id, layer)` membership. `layer` is an ordinary integer, never a bitmask. A Rod that belongs to two layers has two rows, with layer-specific `role`, `left_neighbor`, and `right_neighbor` values.
+- `training_rod_id` is a per-channel FF configuration field, not a saved UI preference. When present it must identify a Layer 2 Rod in the same Channel; when absent (`null` in JSON or blank in `channels.csv`), Training scanning and training are unavailable for that Channel.
 - Roles are fixed: `0` middle (both neighbors present), `1` left end (right neighbor only), `2` right end (left neighbor only), and `3` isolated (no neighbors). Neighbor links must be reciprocal inside the same layer.
 - Every neighboring pair requires a `pair_clearance_rules.csv` record with the same `layer`. Current state, safe phase, and target phase are checked for every layer in which a Rod appears.
 

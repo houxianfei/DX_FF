@@ -18,6 +18,7 @@
         "poll_period_ms": 20,
         "retry_count": 3
       },
+      "training_rod_id": 12,
       "layer_members": [
         {
           "layer": 0,
@@ -494,6 +495,7 @@
         "poll_period_ms": 20,
         "retry_count": 3
       },
+      "training_rod_id": null,
       "layer_members": [],
       "clearance_rules": [],
       "rods": [
@@ -791,6 +793,7 @@
         "poll_period_ms": 20,
         "retry_count": 3
       },
+      "training_rod_id": null,
       "layer_members": [],
       "clearance_rules": [],
       "rods": [

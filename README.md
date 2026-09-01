@@ -26,7 +26,7 @@ python tools/ff_config_convert.py validate config/templates
 python tools/ff_config_convert.py validate ff_config.json
 ```
 
-规范配置格式为 UTF-8 JSON；CSV 主要用于人工编辑和交换。
+规范配置格式为 UTF-8 JSON；CSV 主要用于人工编辑和交换。训练杆由每个 Channel 的 `training_rod_id` 配置：JSON 使用 Rod ID 或 `null`，CSV 使用 `channels.csv` 的同名列（留空表示未配置）；填写时必须为该 Channel 的 Layer 2 Rod。
 
 ## 正式版工程
 

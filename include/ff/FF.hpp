@@ -150,6 +150,10 @@ struct ControllerConfig {
 struct FFChannelConfig {
   ChannelId id{};
   ControllerConfig controller;
+  // Training Rod is a machine/topology setting, not a per-user UI choice.
+  // A missing value explicitly means this channel is not configured for
+  // Training yet.
+  std::optional<RodId> trainingRod;
   std::vector<RodConfig> rods;
   std::vector<LayerMembership> layerMembers;
   std::vector<PairClearanceRule> clearanceRules;
@@ -405,10 +409,11 @@ public:
   Rod *findRod(RodAddress address) noexcept;
   const Rod *findRod(RodAddress address) const noexcept;
   Result<void> validateConfiguration() const;
+  // Validate a complete or partial target state without sending motion.
+  Result<void> validateMotion(const MotionRequest &) const;
   std::string lastError() const;
 
 private:
-  Result<void> validateMotion(const MotionRequest &) const;
   FFConfig config_{};
   std::array<std::unique_ptr<FFChannel>, 3> channels_{};
   mutable std::mutex mutex_;
@@ -439,11 +444,17 @@ public:
   Result<void> setRodTarget(const RodTarget &);
   // Validates the complete target set before any backend command is sent.
   Result<void> setRodTargets(const std::vector<RodTarget> &);
+  // Performs the same limit/topology/clearance validation as setRodTargets,
+  // but never sends a backend command.
+  Result<void> validateRodTargets(const std::vector<RodTarget> &);
   Result<MotionPlan> previewPlan(const MotionRequest &);
   Result<void> executePlan(const MotionPlan &);
   Result<void> cancelMotion();
   Result<void> emergencyStop();
   FFStatus status() const;
+  // A copy for read-only tools such as the Training UI.  Callers cannot
+  // mutate the connected machine through this value.
+  std::optional<FFConfig> config() const;
   std::optional<RodConfig> rodConfig(RodAddress address) const;
   bool connected() const noexcept;
   bool simulation() const noexcept;

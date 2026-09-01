@@ -11,7 +11,10 @@ from typing import Any
 
 CHANNELS = ("CH1", "CH2", "CH3")
 SYSTEM_FIELDS = ("machine_id", "config_version", "max_active_rod_count", "status_expiration_ms")
-CHANNEL_FIELDS = ("channel_id", "controller_name", "port", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count")
+CHANNEL_FIELDS = (
+    "channel_id", "controller_name", "port", "baud_rate", "timeout_ms",
+    "poll_period_ms", "retry_count", "training_rod_id",
+)
 ROD_FIELDS = (
     "channel_id", "rod_id", "name", "hard_min", "hard_max", "soft_min", "soft_max",
     "zero_position", "safe_position", "safe_position_valid", "P0", "P1",
@@ -21,7 +24,7 @@ ROD_FIELDS = (
 ROD_LAYER_FIELDS = ("channel_id", "rod_id", "layer", "role", "left_neighbor", "right_neighbor")
 RANGE_FIELDS = ("channel_id", "rod_id", "range_kind", "min_position", "max_position")
 PAIR_FIELDS = ("channel_id", "layer", "rod_a", "rod_b", "minimum_clearance_mm")
-INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "rod_id", "rod_a", "rod_b", "layer", "role", "left_neighbor", "right_neighbor", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "min_position", "max_position"}
+INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "training_rod_id", "rod_id", "rod_a", "rod_b", "layer", "role", "left_neighbor", "right_neighbor", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "min_position", "max_position"}
 FLOAT_FIELDS = {"P0", "P1", "max_velocity", "max_acceleration", "max_deceleration", "minimum_clearance_mm"}
 BOOL_FIELDS = {"safe_position_valid"}
 
@@ -121,6 +124,14 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{cid}/layer {layer}/Rod{rid}: left_neighbor 不互反")
             if has_right and by_member.get((layer, right), {}).get("left_neighbor") != rid:
                 errors.append(f"{cid}/layer {layer}/Rod{rid}: right_neighbor 不互反")
+        training_rod = ch.get("training_rod_id")
+        if training_rod is not None:
+            if not isinstance(training_rod, int) or not 0 <= training_rod <= 255:
+                errors.append(f"{cid}: training_rod_id 非法: {training_rod}")
+            elif training_rod not in seen_rods:
+                errors.append(f"{cid}: training_rod_id 引用了不存在的 Rod: {training_rod}")
+            elif (2, training_rod) not in seen_memberships:
+                errors.append(f"{cid}: training_rod_id 必须属于 Layer 2: {training_rod}")
     if seen_channels != set(CHANNELS):
         errors.append("Channel 集合必须为 CH1、CH2、CH3")
     return errors
@@ -146,7 +157,9 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
             "serial": {"port": required(row, "port", "channels.csv"), "baud_rate": row["baud_rate"], "timeout_ms": row["timeout_ms"]},
             "poll_period_ms": row["poll_period_ms"], "retry_count": row["retry_count"],
         }
-        channels.append({"id": cid, "controller": controller, "layer_members": [], "clearance_rules": [], "rods": []})
+        channels.append({"id": cid, "controller": controller,
+                         "training_rod_id": row["training_rod_id"],
+                         "layer_members": [], "clearance_rules": [], "rods": []})
     by_channel = {ch["id"]: ch for ch in channels}
     for row in rod_rows:
         cid = required(row, "channel_id", "rods.csv")
@@ -200,7 +213,7 @@ def json_to_csv(config: dict[str, Any], directory: Path) -> None:
     pairs = []
     for ch in config["channels"]:
         serial = ch.get("controller", {}).get("serial", {})
-        channels.append({"channel_id": ch["id"], "controller_name": ch.get("controller", {}).get("name", ""), "port": serial.get("port", ""), "baud_rate": serial.get("baud_rate", 115200), "timeout_ms": serial.get("timeout_ms", 500), "poll_period_ms": ch.get("controller", {}).get("poll_period_ms", 20), "retry_count": ch.get("controller", {}).get("retry_count", 3)})
+        channels.append({"channel_id": ch["id"], "controller_name": ch.get("controller", {}).get("name", ""), "port": serial.get("port", ""), "baud_rate": serial.get("baud_rate", 115200), "timeout_ms": serial.get("timeout_ms", 500), "poll_period_ms": ch.get("controller", {}).get("poll_period_ms", 20), "retry_count": ch.get("controller", {}).get("retry_count", 3), "training_rod_id": ch.get("training_rod_id")})
         for rod in ch.get("rods", []):
             row = {"channel_id": ch["id"], "rod_id": rod.get("id", ""), **rod}
             rods.append(row)

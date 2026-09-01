@@ -23,7 +23,7 @@ ff::RodAddress address{ff::ChannelId::CH1, 0};
 
 `FFConfig` 包含机台编号、配置版本、三个独立的 `FFChannelConfig`、活动杆数量上限和状态过期时间。
 
-每个 `FFChannelConfig` 包含 `ChannelId`、一个 `ControllerConfig` 和该控制器下的 `RodConfig` 列表。初始化应检查：三个 Channel 齐全且不重复、串口名不重复、同一 Channel 内杆 ID 不重复、ID 在设备允许范围内、软限位位于硬限位内。
+每个 `FFChannelConfig` 包含 `ChannelId`、一个 `ControllerConfig`、可选的 `training_rod_id` 和该控制器下的 `RodConfig` 列表。`training_rod_id` 是机台拓扑配置：设置时必须指向本 Channel 中存在的 Layer 2 Rod；未配置时写 `null`。Training UI 只读取此字段，不允许用 INI 或界面控件替换它。初始化应检查：三个 Channel 齐全且不重复、串口名不重复、同一 Channel 内杆 ID 不重复、ID 在设备允许范围内、软限位位于硬限位内。
 
 `RodConfig` 保存杆的限位、零位、安全位、位置换算、运动方向、速度、加减速度、到位容差、稳定时间、超时时间和层掩码。
 
@@ -47,7 +47,7 @@ JSON 示例：
 ```json
 {
   "schema": "ff-config",
-  "schema_version": 1,
+  "schema_version": 2,
   "machine_id": "FF-001",
   "config_version": "FF-CONFIG-0.1",
   "max_active_rod_count": 8,
@@ -61,6 +61,7 @@ JSON 示例：
         "poll_period_ms": 20,
         "retry_count": 3
       },
+      "training_rod_id": 0,
       "rods": [
         {
           "id": 0,
@@ -87,8 +88,8 @@ JSON 示例：
         { "rod_id": 0, "layer": 1, "role": 3, "left_neighbor": -1, "right_neighbor": -1 }
       ]
     },
-    { "id": "CH2", "controller": { "name": "CTRL-CH2", "serial": { "port": "COM4", "baud_rate": 115200, "timeout_ms": 500 } }, "rods": [] },
-    { "id": "CH3", "controller": { "name": "CTRL-CH3", "serial": { "port": "COM5", "baud_rate": 115200, "timeout_ms": 500 } }, "rods": [] }
+    { "id": "CH2", "controller": { "name": "CTRL-CH2", "serial": { "port": "COM4", "baud_rate": 115200, "timeout_ms": 500 } }, "training_rod_id": null, "rods": [] },
+    { "id": "CH3", "controller": { "name": "CTRL-CH3", "serial": { "port": "COM5", "baud_rate": 115200, "timeout_ms": 500 } }, "training_rod_id": null, "rods": [] }
   ]
 }
 ```
@@ -267,4 +268,4 @@ python tools/ff_config_convert.py validate config/templates
 python tools/ff_config_convert.py validate config.json
 ```
 
-CSV 配置目录至少包含 `system.csv`、`channels.csv` 和 `rods.csv`。脚本读取 CSV 后先执行结构和数值校验，校验失败时不会生成 JSON；JSON 导出前也会执行同样的校验。推荐将 CSV 目录作为人工审核源，将生成的 JSON 作为 FF 程序运行文件。
+CSV 配置目录至少包含 `system.csv`、`channels.csv` 和 `rods.csv`。`channels.csv` 的 `training_rod_id` 为可选列值：填写时必须是该 Channel 的 Layer 2 Rod；留空会生成 JSON `null`。脚本读取 CSV 后先执行结构和数值校验，校验失败时不会生成 JSON；JSON 导出前也会执行同样的校验。推荐将 CSV 目录作为人工审核源，将生成的 JSON 作为 FF 程序运行文件。

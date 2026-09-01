@@ -1,6 +1,8 @@
 #include "ff/FF.hpp"
 #include <algorithm>
+#include <cmath>
 #include <mutex>
+#include <thread>
 
 namespace ff {
 struct FFApplicationService::Impl {
@@ -121,6 +123,16 @@ FFApplicationService::setRodTargets(const std::vector<RodTarget> &targets) {
   return x ? Result<void>::success()
            : Result<void>::failure(x.error, x.message);
 }
+Result<void>
+FFApplicationService::validateRodTargets(const std::vector<RodTarget> &targets) {
+  std::lock_guard l(impl_->mutex);
+  if (!impl_->machine || !impl_->connected)
+    return Result<void>::failure(ErrorCode::NotConnected);
+  auto refreshed = impl_->machine->refreshStatus();
+  if (!refreshed)
+    return Result<void>::failure(refreshed.error, refreshed.message);
+  return impl_->machine->validateMotion({targets, false});
+}
 Result<MotionPlan> FFApplicationService::previewPlan(const MotionRequest &r) {
   std::lock_guard l(impl_->mutex);
   if (!impl_->machine)
@@ -139,6 +151,47 @@ Result<void> FFApplicationService::executePlan(const MotionPlan &p) {
         {{{s.address, s.position, s.velocity}}, false});
     if (!x)
       return Result<void>::failure(x.error, x.message);
+    const auto *rod = impl_->machine->findRod(s.address);
+    if (!rod)
+      return Result<void>::failure(ErrorCode::RodNotFound);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          rod->config().moveTimeout;
+    std::optional<std::chrono::steady_clock::time_point> stableSince;
+    for (;;) {
+      auto refreshed = impl_->machine->refreshStatus();
+      if (!refreshed)
+        return Result<void>::failure(refreshed.error, refreshed.message);
+      const auto status = impl_->machine->status();
+      const auto channel = static_cast<int>(s.address.channel);
+      const auto config = impl_->machine->config().channels[channel];
+      const auto it = std::find_if(config.rods.begin(), config.rods.end(),
+                                   [&](const RodConfig &entry) {
+                                     return entry.id == s.address.rod;
+                                   });
+      const auto index = static_cast<size_t>(std::distance(config.rods.begin(), it));
+      if (it == config.rods.end() || index >= status.channels[channel].rods.size())
+        return Result<void>::failure(ErrorCode::RodNotFound);
+      const auto &feedback = status.channels[channel].rods[index];
+      if (feedback.alarm || feedback.state == RodState::Fault)
+        return Result<void>::failure(ErrorCode::DeviceAlarm,
+                                     "Rod fault while executing plan");
+      const bool atTarget = feedback.positionValid &&
+          std::abs(feedback.actualPosition - s.position) <=
+              rod->config().positionTolerance;
+      if (atTarget) {
+        if (!stableSince)
+          stableSince = std::chrono::steady_clock::now();
+        if (std::chrono::steady_clock::now() - *stableSince >=
+            rod->config().stableTime)
+          break;
+      } else {
+        stableSince.reset();
+      }
+      if (std::chrono::steady_clock::now() >= deadline)
+        return Result<void>::failure(ErrorCode::Timeout,
+                                     "Timed out waiting for Rod target");
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
   }
   return Result<void>::success();
 }
@@ -154,6 +207,11 @@ Result<void> FFApplicationService::emergencyStop() {
 FFStatus FFApplicationService::status() const {
   std::lock_guard l(impl_->mutex);
   return impl_->machine ? impl_->machine->status() : FFStatus{};
+}
+std::optional<FFConfig> FFApplicationService::config() const {
+  std::lock_guard l(impl_->mutex);
+  return impl_->machine ? std::optional<FFConfig>(impl_->machine->config())
+                        : std::nullopt;
 }
 std::optional<RodConfig>
 FFApplicationService::rodConfig(RodAddress address) const {
