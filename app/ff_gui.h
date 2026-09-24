@@ -52,6 +52,9 @@ private:
   std::optional<ff::RodTarget> trainingEvasionTarget_;
   bool trainingScanning_{false};
   bool trainingMovePending_{false};
+  // Scan-specific dwell after in-tolerance feedback.  This is intentionally
+  // independent of RodConfig::stableTime, which is used for full motion plans.
+  int trainingSettleMs_{20};
   double trainingNextMm_{0.0};
   std::optional<std::chrono::steady_clock::time_point> trainingStableSince_;
   std::array<bool, 3> trainingRangeInitialized_{};

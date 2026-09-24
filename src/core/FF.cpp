@@ -128,7 +128,8 @@ double clearanceFor(const FFChannelConfig &channel, int layer, RodId first,
 Result<void>
 validateLayerClearance(const FFChannelConfig &channel,
                        const ChannelStatus &status,
-                       const std::unordered_map<RodId, int32_t> &overrides) {
+                       const std::unordered_map<RodId, int32_t> &overrides,
+                       const std::unordered_set<RodId> *checkedRods = nullptr) {
   const auto topology = validateLayerTopology(channel);
   if (!topology)
     return topology;
@@ -153,6 +154,12 @@ validateLayerClearance(const FFChannelConfig &channel,
       continue;
     const auto first = member.rod;
     const auto second = static_cast<RodId>(member.rightNeighbor);
+    // A partial command must not be rejected by position noise from an
+    // unrelated stationary pair.  The commanded Rod still checks both of its
+    // direct neighbors, so this never relaxes its own collision boundary.
+    if (checkedRods && !checkedRods->count(first) &&
+        !checkedRods->count(second))
+      continue;
     bool hasClearanceRule = false;
     const auto clearance =
         clearanceFor(channel, member.layer, first, second, hasClearanceRule);
@@ -173,7 +180,7 @@ validateLayerClearance(const FFChannelConfig &channel,
     // the right of this (left) Rod by at least the configured separation.
     // Do not use abs() here: it would discard that order and would make a
     // negative separation rule meaningless.
-    if (secondMm - firstMm < clearance)
+    if ((secondMm - firstMm) + kLayerClearanceToleranceMm < clearance)
       return Result<void>::failure(ErrorCode::SafetyViolation,
                                    "Layer neighbor order or clearance is violated");
   }
@@ -185,17 +192,12 @@ Result<void> FFConfigIO::validate(const FFConfig &config) {
   if (config.machineId.empty() || config.configVersion.empty())
     return Result<void>::failure(ErrorCode::InvalidConfiguration,
                                  "Machine ID and configuration version are required");
-  std::unordered_set<std::string> ports;
   std::size_t rodCount = 0;
   for (int i = 0; i < 3; ++i) {
     const auto &channel = config.channels[i];
     if (static_cast<int>(channel.id) != i)
       return Result<void>::failure(ErrorCode::MissingChannel,
                                    "Configuration must contain CH1, CH2 and CH3");
-    if (channel.controller.serial.portName.empty() ||
-        !ports.insert(channel.controller.serial.portName).second)
-      return Result<void>::failure(ErrorCode::DuplicatePort,
-                                   "Controller serial ports must be non-empty and unique");
     std::unordered_set<int> ids;
     for (const auto &rod : channel.rods) {
       ++rodCount;
@@ -556,6 +558,18 @@ Result<void> Controller::refreshStatus() {
   }
   return Result<void>::success();
 }
+Result<void> Controller::refreshStatus(RodId id) {
+  auto *rod = findRod(id);
+  if (!rod)
+    return Result<void>::failure(ErrorCode::RodNotFound);
+  std::lock_guard l(ioMutex_);
+  auto status = backend_->readStatus(id);
+  if (!status)
+    return Result<void>::failure(status.error, status.message);
+  std::lock_guard rl(rod->mutex_);
+  rod->status_ = status.value;
+  return Result<void>::success();
+}
 Result<void> Controller::enable(RodId id, bool e) {
   auto *r = findRod(id);
   if (!r)
@@ -758,6 +772,17 @@ Result<void> FF::refreshStatus() {
   }
   return Result<void>::success();
 }
+Result<void> FF::refreshRodStatus(RodAddress address) {
+  auto *selectedChannel = channel(address.channel);
+  if (!selectedChannel)
+    return Result<void>::failure(ErrorCode::RodNotFound);
+  auto refreshed = selectedChannel->controller().refreshStatus(address.rod);
+  if (!refreshed) {
+    state_ = FFState::Degraded;
+    lastError_ = refreshed.message;
+  }
+  return refreshed;
+}
 Result<ChannelSafetyStatus> FF::refreshChannelSafety(ChannelId id) {
   auto *c = channel(id);
   if (!c)
@@ -769,12 +794,32 @@ ChannelSafetyStatus FF::channelSafety(ChannelId id) const {
                      : ChannelSafetyStatus{};
 }
 Result<MotionReceipt> FF::submitMotion(const MotionRequest &r) {
-  // Safety boundaries depend on the actual positions of neighboring Rods.
-  // Refresh every configured Rod before validating so callers cannot make a
-  // decision from stale cached feedback.
-  auto refreshed = refreshStatus();
-  if (!refreshed)
-    return Result<MotionReceipt>::failure(refreshed.error, refreshed.message);
+  // A partial command validates only the commanded Rods and their direct
+  // layer neighbors. Refresh that same scope so unrelated stationary Rod I/O
+  // cannot dominate a Training scan step or introduce feedback-noise stops.
+  std::array<std::unordered_set<RodId>, 3> refreshIds;
+  for (const auto &target : r.targets) {
+    const auto channelIndex = static_cast<int>(target.address.channel);
+    refreshIds[channelIndex].insert(target.address.rod);
+    for (const auto &member : config_.channels[channelIndex].layerMembers) {
+      if (member.rod != target.address.rod)
+        continue;
+      if (member.leftNeighbor >= 0)
+        refreshIds[channelIndex].insert(
+            static_cast<RodId>(member.leftNeighbor));
+      if (member.rightNeighbor >= 0)
+        refreshIds[channelIndex].insert(
+            static_cast<RodId>(member.rightNeighbor));
+    }
+  }
+  for (int channelIndex = 0; channelIndex < 3; ++channelIndex) {
+    for (const auto rod : refreshIds[channelIndex]) {
+      auto refreshed = channels_[channelIndex]->controller().refreshStatus(rod);
+      if (!refreshed)
+        return Result<MotionReceipt>::failure(refreshed.error,
+                                              refreshed.message);
+    }
+  }
   auto v = validateMotion(r);
   if (!v)
     return Result<MotionReceipt>::failure(v.error, v.message);
@@ -891,13 +936,17 @@ Result<void> FF::validateMotion(const MotionRequest &r) const {
   const auto current = status();
   for (int i = 0; i < 3; ++i) {
     std::unordered_map<RodId, int32_t> positions;
+    std::unordered_set<RodId> checkedRods;
     for (const auto &target : r.targets)
-      if (static_cast<int>(target.address.channel) == i)
+      if (static_cast<int>(target.address.channel) == i) {
         positions[target.address.rod] = target.position;
+        checkedRods.insert(target.address.rod);
+      }
     if (positions.empty())
       continue;
     auto safety = validateLayerClearance(config_.channels[i],
-                                         current.channels[i], positions);
+                                         current.channels[i], positions,
+                                         &checkedRods);
     if (!safety)
       return safety;
   }

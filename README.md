@@ -1,12 +1,13 @@
 # FF 工程
 
-FF 是一套包含 3 个 Channel 和多根 MightyZap 遮挡棒的整机对象模型与运动规划资料。
+FF 是一套包含 3 个 Channel 和多根 MightyZap 遮挡棒的整机控制、训练与运动规划工程。当前发布为 **FF GUI 1.1.0 / FF C++ SDK 1.1.0**。GUI 面向操作人员；SDK 面向集成方，二者共享同一配置、安全校验和后端适配层。
 
 ## 目录说明
 
 | 目录 | 用途 |
 | --- | --- |
 | `include/ff/` | FF 对外公共 C++ 接口 |
+| `FF_SDK/` | 可直接交付的 SDK 发布包（由发布脚本生成） |
 | `third_party/MightyZap/` | MightyZap 厂商 SDK 的头文件、导入库和运行时 DLL |
 | `docs/architecture/` | SDK、对象模型和生命周期说明 |
 | `docs/design/` | 坐标体系、拓扑、安全和运动规划设计 |
@@ -46,7 +47,19 @@ powershell -ExecutionPolicy Bypass -File tools/package_ff_gui_app.ps1 -Configura
 powershell -ExecutionPolicy Bypass -File tools/build_ff_gui_installer.ps1 -Configuration Release -SkipPackage
 ```
 
-安装包输出为 `publish/installer/FF_GUI_Setup_v1.0.0.exe`。程序默认使用 Simulation 模式；配置、日志和运行数据位于 `%PROGRAMDATA%\RSIC\FF`。
+安装包输出为 `publish/installer/FF_GUI_Setup_v1.1.0.exe`。程序默认使用 Simulation 模式；配置、日志和运行数据位于 `%PROGRAMDATA%\RSIC\FF`。
+
+## SDK 发布
+
+SDK 发布包面向 Windows x64 / VS2019 v142 / C++17 集成。它包含公共头文件、Release 静态库、MightyZap 运行时依赖、配置样例和详细接口文档。构建并生成发布包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_ff_sdk.ps1 -Configuration Release
+```
+
+输出目录为 `FF_SDK/`；入口文档是 `FF_SDK/README.md`，完整接口、安全模型与训练会话格式见 `FF_SDK/docs/FF_SDK_Reference.md`。SDK 版本与 GUI 版本独立标识，但本次二者均为 1.1.0。
+
+> 真实硬件上线前，必须在目标机完成限位、零位、标定、拓扑、禁区和间隙规则的复核。Simulation 仅用于软件验证，不能证明机械安全性。
 
 ## 后续开发入口
 

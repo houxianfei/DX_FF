@@ -1,5 +1,5 @@
 #define MyAppName "FF GUI"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "RSIC"
 #define MyAppExeName "ff_gui.exe"
 [Setup]
@@ -23,9 +23,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "..\publish\ff_gui_app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Dirs]
-Name: "{commonappdata}\RSIC\FF"
-Name: "{commonappdata}\RSIC\FF\logs"
-Name: "{commonappdata}\RSIC\FF\data"
+Name: "{commonappdata}\RSIC\FF"; Permissions: users-modify
+Name: "{commonappdata}\RSIC\FF\logs"; Permissions: users-modify
+Name: "{commonappdata}\RSIC\FF\data"; Permissions: users-modify
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon

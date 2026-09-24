@@ -46,6 +46,30 @@ int main() {
   invalidConfig = c;
   invalidConfig.channels[0].trainingRod = RodId{99};
   assert(!FFConfigIO::validate(invalidConfig));
+
+  // Stored controller ports are editable defaults.  The GUI may save blank or
+  // duplicate values for disabled channels; ApplicationService replaces them
+  // with the selected runtime ports before FF initialization.
+  auto editablePorts = c;
+  editablePorts.channels[0].controller.serial.portName.clear();
+  editablePorts.channels[1].controller.serial.portName = "COM2";
+  editablePorts.channels[2].controller.serial.portName = "COM2";
+  assert(FFConfigIO::validate(editablePorts));
+  const auto editablePath =
+      std::filesystem::temp_directory_path() / "ff_editable_ports.json";
+  assert(FFConfigIO::save(editablePath.string(), editablePorts));
+  assert(FFConfigIO::load(editablePath.string()));
+  std::filesystem::remove(editablePath);
+  FFApplicationService editableService;
+  assert(editableService.applyConfig(editablePorts, true, {"", "", ""}, 1));
+  assert(editableService.applyConfig(editablePorts, false,
+                                     {"COM7", "COM7", "COM7"}, 1));
+  FFApplicationService duplicateRuntimePorts;
+  assert(!duplicateRuntimePorts.applyConfig(
+      editablePorts, false, {"COM7", "COM7", ""}, 2));
+  FFApplicationService missingRuntimePort;
+  assert(!missingRuntimePort.applyConfig(editablePorts, false,
+                                         {"", "COM8", ""}, 2));
   std::array<std::unique_ptr<IControllerBackend>, 3> b;
   for (auto &i : b)
     i = makeSimulationBackend();
@@ -60,44 +84,39 @@ int main() {
   // its initialized position.  Assignment must evaluate the Rod at its final
   // evasion position, not reject all candidate Rods against that temporary
   // initialized position.
-  std::array<std::unique_ptr<IControllerBackend>, 3> defaultBackends;
-  for (auto &backend : defaultBackends)
-    backend = makeSimulationBackend();
-  FF defaultMachine(loaded.value, std::move(defaultBackends));
-  assert(defaultMachine.initialize());
-  assert(defaultMachine.connect());
-  assert(defaultMachine.refreshStatus());
+  // Match the GUI loading path: Simulation supplies unique runtime ports even
+  // if editable JSON defaults are intentionally blank or duplicated.
+  FFApplicationService defaultService;
+  assert(defaultService.applyConfig(loaded.value, true, {"", "", ""}, 3));
+  assert(defaultService.connect());
+  assert(defaultService.refresh());
   const auto &defaultChannel = loaded.value.channels[0];
-  auto defaultStatus = defaultMachine.status();
+  auto defaultStatus = defaultService.status();
   const auto trainingRodIt = std::find_if(
       defaultChannel.rods.begin(), defaultChannel.rods.end(),
       [](const RodConfig &rod) { return rod.id == RodId{12}; });
   assert(trainingRodIt != defaultChannel.rods.end());
   const auto trainingRodIndex = static_cast<size_t>(
       std::distance(defaultChannel.rods.begin(), trainingRodIt));
-  defaultStatus.channels[0].rods[trainingRodIndex].actualPosition =
-      trainingRodIt->softMax;
-  defaultStatus.channels[0].rods[trainingRodIndex].targetPosition =
-      trainingRodIt->softMax;
+  // Keep the Training Rod at its initialized legal position.  Assignment may
+  // move it only when the complete Layer 2 layout requires an evasion move.
   const auto loadedSessionAssignment = TrainingAnalysis::assign(
       loaded.value, defaultStatus, ChannelId::CH1, {17.3, 35.0, 52.5},
       RodId{12});
   assert(loadedSessionAssignment);
   std::vector<RodTarget> loadedSessionTargets;
-  const auto liveDefaultStatus = defaultMachine.status();
+  const auto liveDefaultStatus = defaultService.status();
   for (size_t index = 0; index < defaultChannel.rods.size(); ++index)
     loadedSessionTargets.push_back(
         {{ChannelId::CH1, defaultChannel.rods[index].id},
          liveDefaultStatus.channels[0].rods[index].actualPosition,
          defaultChannel.rods[index].maxVelocity});
   for (auto &target : loadedSessionTargets) {
-    if (target.address.rod == RodId{12})
-      target.position = trainingRodIt->softMax;
     for (const auto &aim : loadedSessionAssignment.value.aims)
       if (aim.assigned && target.address == aim.address)
         target.position = aim.encoderAim;
   }
-  assert(defaultMachine.validateMotion({loadedSessionTargets, false}));
+  assert(defaultService.validateRodTargets(loadedSessionTargets));
   MotionRequest req{{{{ChannelId::CH1, 0}, 50, 5}}, false};
   auto p = MotionPlanner::plan(c, s, req);
   assert(p);
@@ -122,6 +141,24 @@ int main() {
   auto unsafeLayeredPlan = MotionPlanner::plan(
       layered, layeredStatus, {{{{ChannelId::CH1, 0}, 77, 5}}, false});
   assert(!unsafeLayeredPlan);
+
+  // Clearance comparisons accept 0.10 mm of position/feedback variation,
+  // but reject any larger shortfall.
+  auto precisionLayered = layered;
+  for (auto &rod : precisionLayered.channels[0].rods)
+    rod.p1 = 0.01;
+  precisionLayered.channels[0].rods[0].safePosition = 40;
+  for (auto &rule : precisionLayered.channels[0].clearanceRules)
+    rule.minimumClearanceMm = 0.50;
+  auto precisionStatus = layeredStatus;
+  precisionStatus.channels[0].rods[0].actualPosition = 40;
+  precisionStatus.channels[0].rods[1].actualPosition = 90;
+  auto toleranceAllowed = MotionPlanner::plan(
+      precisionLayered, precisionStatus, {{{{ChannelId::CH1, 0}, 50, 5}}, false});
+  assert(toleranceAllowed);
+  auto toleranceRejected = MotionPlanner::plan(
+      precisionLayered, precisionStatus, {{{{ChannelId::CH1, 0}, 51, 5}}, false});
+  assert(!toleranceRejected);
 
   auto negativeClearance = layered;
   for (auto &rule : negativeClearance.channels[0].clearanceRules)
@@ -158,6 +195,37 @@ int main() {
          beforeRejectedTarget.channels[0].rods[0].actualPosition);
   assert(afterRejectedTarget.channels[0].rods[0].targetPosition ==
          beforeRejectedTarget.channels[0].rods[0].targetPosition);
+
+  // A command checks the commanded Rod's own neighbors, but a transient
+  // clearance reading from an unrelated stationary pair must not block it.
+  auto scoped = cfg();
+  for (RodId id = 1; id < 4; ++id) {
+    auto rod = scoped.channels[0].rods.front();
+    rod.id = id;
+    scoped.channels[0].rods.push_back(rod);
+  }
+  scoped.channels[0].layerMembers = {
+      {0, 4, 1, -1, 1}, {1, 4, 2, 0, -1},
+      {2, 5, 1, -1, 3}, {3, 5, 2, 2, -1}};
+  scoped.channels[0].clearanceRules = {{4, 0, 1, 5.0}, {5, 2, 3, 5.0}};
+  std::array<std::unique_ptr<IControllerBackend>, 3> scopedBackends;
+  for (auto &backend : scopedBackends)
+    backend = makeSimulationBackend();
+  FF scopedMachine(scoped, std::move(scopedBackends));
+  assert(scopedMachine.initialize());
+  assert(scopedMachine.connect());
+  // Establish a valid pair for Rod 0, then inject an invalid, non-commanded
+  // pair through the backend to model independent feedback vibration.
+  assert(scopedMachine.channel(ChannelId::CH1)->controller().submit(
+      {{ChannelId::CH1, 0}, 40, 5}));
+  assert(scopedMachine.channel(ChannelId::CH1)->controller().submit(
+      {{ChannelId::CH1, 1}, 80, 5}));
+  assert(scopedMachine.channel(ChannelId::CH1)->controller().submit(
+      {{ChannelId::CH1, 2}, 78, 5}));
+  assert(scopedMachine.channel(ChannelId::CH1)->controller().submit(
+      {{ChannelId::CH1, 3}, 80, 5}));
+  MotionRequest scopedRequest{{{{ChannelId::CH1, 0}, 50, 5}}, false};
+  assert(scopedMachine.submitMotion(scopedRequest));
 
   MotionRequest badReq{{{{ChannelId::CH1, 0}, 101, 1}}, false};
   auto bad = f.submitMotion(badReq);

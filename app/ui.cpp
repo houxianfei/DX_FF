@@ -291,6 +291,9 @@ void MainUi::loadUiSettings() {
       try { training_.endMm = std::stod(value); } catch (const std::exception &) {}
     } else if (key == "training_step_mm") {
       try { training_.stepMm = std::stod(value); } catch (const std::exception &) {}
+    } else if (key == "training_settle_ms") {
+      try { trainingSettleMs_ = std::clamp(std::stoi(value), 0, 500); }
+      catch (const std::exception &) {}
     } else if (key == "training_smoothing") {
       try { training_.valleySettings.smoothingPoints = std::stoi(value); } catch (const std::exception &) {}
     } else if (key == "training_prominence") {
@@ -348,6 +351,7 @@ void MainUi::saveUiSettings() const {
   output << "training_start_mm=" << training_.startMm << "\n";
   output << "training_end_mm=" << training_.endMm << "\n";
   output << "training_step_mm=" << training_.stepMm << "\n";
+  output << "training_settle_ms=" << trainingSettleMs_ << "\n";
   output << "training_smoothing=" << training_.valleySettings.smoothingPoints << "\n";
   output << "training_prominence="
          << training_.valleySettings.minimumProminenceFraction << "\n";
@@ -873,53 +877,8 @@ bool MainUi::updateTrainingAssignment() {
   const int channelIndex = static_cast<int>(training_.channel);
   const auto &channelConfig = config->channels[channelIndex];
   const auto current = service_.status();
-  const auto trainingRod = std::find_if(
-      channelConfig.rods.begin(), channelConfig.rods.end(),
-      [&](const ff::RodConfig &rod) { return rod.id == training_.trainingRod; });
-  const auto membership = std::find_if(
-      channelConfig.layerMembers.begin(), channelConfig.layerMembers.end(),
-      [&](const ff::LayerMembership &member) {
-        return member.layer == 2 && member.rod == training_.trainingRod;
-      });
-  if (trainingRod == channelConfig.rods.end() ||
-      membership == channelConfig.layerMembers.end()) {
-    trainingNotice_ = "Training Rod has no Layer 2 evasion neighbor.";
-    return false;
-  }
-  const int neighborId = membership->rightNeighbor >= 0
-      ? membership->rightNeighbor : membership->leftNeighbor;
-  const auto neighbor = std::find_if(
-      channelConfig.rods.begin(), channelConfig.rods.end(),
-      [&](const ff::RodConfig &rod) { return int(rod.id) == neighborId; });
-  if (neighbor == channelConfig.rods.end()) {
-    trainingNotice_ = "Training Rod has no Layer 2 evasion neighbor.";
-    return false;
-  }
-  const double minMm = trainingRod->p0 + trainingRod->p1 * trainingRod->softMin;
-  const double maxMm = trainingRod->p0 + trainingRod->p1 * trainingRod->softMax;
-  const bool neighborIsRight = membership->rightNeighbor == neighborId;
-  const auto evasionEncoder = neighborIsRight
-      ? (minMm >= maxMm ? trainingRod->softMin : trainingRod->softMax)
-      : (minMm <= maxMm ? trainingRod->softMin : trainingRod->softMax);
-  trainingEvasionTarget_ = ff::RodTarget{{training_.channel,
-                                           training_.trainingRod},
-                                          evasionEncoder,
-                                          trainingRod->maxVelocity};
-
-  // The final state moves the Training Rod to this evasion position.  Use
-  // that final position while selecting the obstruction Rods, otherwise a
-  // freshly initialized Training Rod can falsely block every assignment.
-  auto assignmentStatus = current;
-  const auto trainingRodIndex = static_cast<size_t>(
-      std::distance(channelConfig.rods.begin(), trainingRod));
-  if (trainingRodIndex < assignmentStatus.channels[channelIndex].rods.size()) {
-    auto &status = assignmentStatus.channels[channelIndex].rods[trainingRodIndex];
-    status.actualPosition = evasionEncoder;
-    status.targetPosition = evasionEncoder;
-    status.positionValid = true;
-  }
   const auto assignment = ff::TrainingAnalysis::assign(
-      *config, assignmentStatus, training_.channel, training_.candidatesMm,
+      *config, current, training_.channel, training_.candidatesMm,
       training_.trainingRod);
   if (!assignment) { training_.aims.clear(); trainingNotice_ = assignment.message; return false; }
   training_.aims = assignment.value.aims;
@@ -941,8 +900,7 @@ bool MainUi::updateTrainingAssignment() {
         [&](const ff::RodTarget &entry) { return entry.address == replacement.address; });
     if (target != targets.end()) *target = replacement;
   };
-  setTarget(*trainingEvasionTarget_);
-  for (const auto &aim : training_.aims) if (aim.assigned) {
+  for (const auto &aim : training_.aims) {
     const auto rod = std::find_if(channelConfig.rods.begin(), channelConfig.rods.end(),
         [&](const ff::RodConfig &entry) { return entry.id == aim.address.rod; });
     if (rod != channelConfig.rods.end())
@@ -971,16 +929,17 @@ void MainUi::tickTrainingScan() {
   const auto it = std::find_if(rods.begin(), rods.end(), [&](const ff::RodConfig &r) { return r.id == training_.trainingRod; });
   if (it == rods.end() || std::abs(it->p1) < 1e-12) { trainingScanning_ = false; trainingNotice_ = "Scan stopped: training Rod calibration is invalid."; return; }
   const int rodIndex = static_cast<int>(std::distance(rods.begin(), it));
-  // The simulation backend applies a goal synchronously.  Waiting the normal
-  // hardware stable-time (100 ms by default) for every 0.1 mm point made a
-  // 701-point simulation take over a minute.  Keep the hardware state machine
-  // intact, but advance bounded synchronous simulation transitions per frame.
+  // The simulation backend applies a goal synchronously.  Keep the hardware
+  // state machine intact, but advance bounded synchronous simulation
+  // transitions per frame.  Hardware scans use the shorter, user-visible scan
+  // dwell instead of RodConfig::stableTime, which is intended for full plans.
   const bool fastSimulation = service_.simulation() &&
       (training_.source == ff::TrainingSource::Sim1 || training_.source == ff::TrainingSource::Sim2);
   const int budget = fastSimulation ? 48 : 1;
   for (int transition = 0; transition < budget && trainingScanning_; ++transition) {
     if (trainingMovePending_) {
-      auto refreshed = service_.refresh();
+      auto refreshed = service_.refreshRod(
+          {training_.channel, training_.trainingRod});
       const auto status = service_.status();
       if (!refreshed || rodIndex >= static_cast<int>(status.channels[channel].rods.size())) {
         trainingScanning_ = false; trainingMovePending_ = false;
@@ -993,7 +952,8 @@ void MainUi::tickTrainingScan() {
           feedback.state == ff::RodState::Fault) { trainingStableSince_.reset(); break; }
       if (!fastSimulation) {
         if (!trainingStableSince_) { trainingStableSince_ = std::chrono::steady_clock::now(); break; }
-        if (std::chrono::steady_clock::now() - *trainingStableSince_ < it->stableTime) break;
+        if (std::chrono::steady_clock::now() - *trainingStableSince_ <
+            std::chrono::milliseconds(trainingSettleMs_)) break;
       }
       const double actualMm = it->p0 + it->p1 * feedback.actualPosition;
       training_.samples.push_back({actualMm, ff::TrainingAnalysis::simulatedEnergy(training_.source, actualMm, training_.startMm, training_.endMm)});
@@ -1141,6 +1101,13 @@ void MainUi::training() {
   ImGui::SameLine();
   ImGui::SetNextItemWidth(numberWidth);
   trainingSettingsChanged |= ImGui::InputDouble("Step (mm)", &training_.stepMm, .01, .1, "%.4f");
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(numberWidth);
+  if (ImGui::InputInt("Scan Settle (ms)", &trainingSettleMs_)) {
+    trainingSettleMs_ = std::clamp(trainingSettleMs_, 0, 500);
+    trainingSettingsChanged = true;
+  }
+  tooltip("After feedback reaches the configured position tolerance, wait this long before recording the scan sample. Default: 20 ms. This affects Training scans only, not normal motion-plan stability checks.");
   ImGui::SeparatorText("Valley Detection");
   ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputInt("Smoothing", &training_.valleySettings.smoothingPoints);
   ImGui::SameLine(); ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputDouble("Prominence", &training_.valleySettings.minimumProminenceFraction, .01, .1, "%.3f");
@@ -1394,7 +1361,7 @@ void MainUi::training() {
                        layer2TrainingRodCount);
   ImGui::BeginDisabled(training_.candidatesMm.empty());
   if (ImGui::Button("Train", ImVec2(actionWidth, 0))) updateTrainingAssignment();
-  tooltip("Assign Layer 2 non-IRIS Rods to candidate positions, excluding the Training Rod, and plan its evasion move.");
+  tooltip("Assign candidate positions to Layer 2 Rods. Other eligible Layer 2 Rods receive the minimum safe evasion moves needed to preserve configured clearance.");
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::BeginDisabled(trainingExecutionTargets_.empty());
@@ -1435,17 +1402,17 @@ void MainUi::training() {
       if (!inLayer2 || irisRelated) continue;
       const ff::RodStatus *feedback = index < currentStatus.channels[channel].rods.size() ? &currentStatus.channels[channel].rods[index] : nullptr;
       const auto aim = std::find_if(training_.aims.begin(), training_.aims.end(), [&](const ff::TrainingAim &entry) { return entry.address.rod == rodConfig.id; });
-      const bool isEvasionRod = trainingEvasionTarget_ && !training_.aims.empty() && trainingEvasionTarget_->address.rod == rodConfig.id && trainingEvasionTarget_->address.channel == training_.channel;
+      const bool isEvasionRod = aim != training_.aims.end() && !aim->assigned;
       ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Text("Rod %d", int(rodConfig.id));
       ImGui::TableSetColumnIndex(1); if (feedback) ImGui::Text("%.4f", rodConfig.p0 + rodConfig.p1 * feedback->actualPosition); else ImGui::TextUnformatted("--");
       ImGui::TableSetColumnIndex(2); if (aim != training_.aims.end() && aim->assigned) ImGui::Text("%.4f", aim->quantizedMm); else ImGui::TextUnformatted("--");
       ImGui::TableSetColumnIndex(3);
-      if (isEvasionRod) ImGui::Text("%.4f", rodConfig.p0 + rodConfig.p1 * trainingEvasionTarget_->position);
+      if (isEvasionRod) ImGui::Text("%.4f", aim->quantizedMm);
       else ImGui::TextUnformatted("--");
       ImGui::TableSetColumnIndex(4);
       if (isEvasionRod) ImGui::TextUnformatted(
-          trainingExecutionTargets_.empty() ? "training rod / evasion aim"
-                                            : "training rod / ready");
+          trainingExecutionTargets_.empty() ? "evasion / aim only"
+                                            : "evasion / ready");
       else ImGui::TextUnformatted(
           aim != training_.aims.end() && aim->assigned
               ? (trainingExecutionTargets_.empty() ? "assigned / aim only"

@@ -82,9 +82,9 @@ public:
                                   double positionMm);
   static std::vector<double> findValleys(const std::vector<TrainingSample> &,
                                          const ValleyDetectionSettings &);
-  // Finds the minimum-total-travel legal one-to-one Rod assignment.  Existing
-  // Rods not represented by a candidate intentionally remain at their actual
-  // positions.
+  // Finds the minimum-total-travel legal one-to-one Rod assignment. For an
+  // ordered Layer 2 chain, non-candidate Rods receive safe evasion targets
+  // when needed so parked Rods do not block candidate allocation.
   static Result<RodAimAssignment>
   assign(const FFConfig &, const FFStatus &, ChannelId,
          const std::vector<double> &candidateMm,

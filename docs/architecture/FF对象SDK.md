@@ -1,6 +1,8 @@
 # FF 整机对象 SDK
 
-本文档对应 `include/ff/FF.hpp`，描述一台包含 3 个 Channel 的 FF 机台对象模型。每个 Channel 使用一个独立控制器和一个串口；每个控制器可管理数量不同的 MightyZap 推杆。
+本文档对应 `include/ff/FF.hpp` 和 `include/ff/Training.hpp`，描述 FF C++ SDK 1.1.0 的公共对象模型、配置、安全边界、应用服务和 Training 能力。每个 Channel 使用一个独立控制器和一个串口；每个控制器可管理数量不同的 MightyZap 推杆。
+
+**适用平台与边界：** SDK 的发布目标是 Windows x64、Visual Studio 2019 v142、C++17。Simulation 后端用于功能测试，不等同于机械仿真或安全认证；真实运行前必须完成独立的硬件安全设计、限位验证和现场联调。
 
 ```text
 FF
@@ -108,11 +110,15 @@ JSON 示例：
 | `setGoal` | `GoalPosition` 及速度参数 |
 | `readStatus` | `PresentPosition`、`ReadError` |
 | `enable` | `ForceEnable` |
-| `stop` / `stopAll` | 停止命令 |
+| `stop` / `stopAll` | `ForceEnable(id, false)`；仅作用于适配器已接触过的 ID |
 | `home` | 项目定义的回零流程 |
 | `resetAlarm` | 错误复位流程 |
 
-一个 `Controller` 独占一个后端和一个串口。同一控制器的 SDK 调用必须串行化；不同控制器可以并行。由于原 SDK 部分函数返回 `void`，适配层应结合读回位置、错误寄存器和超时生成 `Result<T>`。
+一个 `Controller` 独占一个后端和一个串口。同一控制器的 SDK 调用由 `ioMutex_` 串行化；不同控制器可以独立操作。由于原 SDK 部分函数返回 `void`，调用方必须结合 `refreshStatus()`、位置容差、稳定时间和超时处理执行结果。
+
+### 当前同步语义
+
+`IControllerBackend::setGoalsSynchronous()` 表示“作为一组目标提交”的扩展点。当前 Simulation 与 MightyZap 适配实现均逐杆调用 `setGoal()` / `GoalPosition()`；因此它不能提供厂商总线同步写或硬实时同步保证。`MotionRequest::allowSoftwareSynchronousStart` 也不把不同串口的命令升级为硬实时同步。若工程需要同步启动，集成方必须在后端中实现并验证厂商同步写机制，并保持同一安全校验语义。
 
 ## 5. 生命周期
 
@@ -186,7 +192,7 @@ auto result = channel->moveAllToPositions(targets);
 // 或：machine.moveChannelToPositions(ff::ChannelId::CH1, targets);
 ```
 
-`moveAllToPositions()` 的位置输入就是 `targets`。函数会先检查当前 Channel 安全，再检查整组目标：目标必须全部属于当前 Channel、每根 Rod 恰好出现一次、位置均在软限位/有效区内，并满足杆间距、拓扑和禁区规则。只有整组通过后，才调用 `setGoalsSynchronous()` 同时下发；任意一根失败都会整体拒绝，不会部分执行。
+`moveAllToPositions()` 的位置输入就是 `targets`。函数会先检查当前 Channel 安全，再检查每个目标的 Channel、地址和单杆合法位置，随后调用 `setGoalsSynchronous()` 作为一组提交。它不要求目标覆盖全部 Rod，也不在该接口中重复整机层拓扑/间隙验证；需要完整规则验证时，优先调用 `FF::submitMotion()` 或 `FFApplicationService::setRodTargets()`。当前后端的“同步”实现为顺序下发，详见第 4 节。
 
 `moveAllToSafePositions()` 只是使用每根 `RodConfig::safePosition` 自动生成上述 `targets` 的便捷方法。
 
@@ -195,10 +201,10 @@ auto result = channel->moveAllToPositions(targets);
 1. 使用当前 Rod 状态和位置确认 Channel 为 `SafetyState::Safe`；
 2. 检查每根 Rod 都有 `safePositionValid == true`，且安全位位于软限位内；
 3. 为所有 Rod 构造目标列表；
-4. 通过 `IControllerBackend::setGoalsSynchronous()` 一次性下发；
+4. 通过 `IControllerBackend::setGoalsSynchronous()` 作为一组下发；
 5. 返回后由 `refreshStatus()` 查询是否全部到位。
 
-如果任一杆状态未知、报警、位置过期、没有安全位或目标非法，则整个操作拒绝下发，不执行部分杆运动。后端实现应使用 MightyZap 总线的同步写/寄存器写机制；不能退化为逐杆调用 `setGoal()`，否则不具备同时启动语义。
+如果任一杆状态未知、报警、没有安全位或目标非法，则整个操作拒绝下发。状态过期检查目前不是 `Controller::evaluateSafety()` 的实现条件；需要新鲜反馈时，调用方应先 `refreshStatus()` 或使用会自动刷新状态的 `FF::submitMotion()`。当前后端逐杆下发，因此不承诺同时启动。
 
 ## 7. 状态与错误
 
@@ -222,11 +228,11 @@ if (fresh && fresh.value.state == ff::SafetyState::Safe) {
 }
 ```
 
-`ChannelSafetyStatus` 的 `state` 取值为 `Unknown`、`Safe`、`Unsafe`、`Checking` 或 `Fault`；`violations` 列出具体原因，例如 `PositionUnknown`、`DeviceAlarm`、`HardLimitActive`、`SoftLimitViolation`、`ForbiddenRange`、`RodInterference` 和 `StaleFeedback`。
+`ChannelSafetyStatus` 的 `state` 取值为 `Unknown`、`Safe`、`Unsafe`、`Checking` 或 `Fault`；`violations` 可包含 `PositionUnknown`、`DeviceAlarm`、`SoftLimitViolation`、`CommunicationLost`、`RodInterference` 与 `InvalidTopology` 等。
 
-安全判定基于每根 Rod 的实时状态和 `RodConfig`：位置是否有效且未过期、设备是否报警、是否触发硬限位、是否越过软限位、是否进入禁区，以及同层杆之间是否满足间距和拓扑规则。`FF::refreshChannelSafety()` 和 `FF::channelSafety()` 提供整机按 Channel 查询入口。
+`Controller::evaluateSafety()` 基于缓存状态检查：位置是否有效、设备是否报警、当前位置是否符合单杆硬/软限位，以及控制器是否连接。`FF::status()` 在此基础上额外执行层拓扑/间隙校验，并用 `RodInterference` 或 `InvalidTopology` 标记不安全。禁止区和完整目标组合由 `FF::validateMotion()` 在命令验证时检查。`FF::refreshChannelSafety()` 和 `FF::channelSafety()` 提供整机按 Channel 查询入口。
 
-维护或测试场景可以设置 `setExternalSafetyOverride()`，但外部覆盖不能绕过通信故障、设备报警和硬限位；正常生产流程不应使用该接口。
+`setExternalSafetyOverride()` 目前是为 API 兼容保留的无操作接口：它返回成功但不改变安全结论。不得将其作为绕过任何安全检查的途径。
 
 ## 9. 停止与急停
 
@@ -248,7 +254,36 @@ machine.resetFaults();
 - 同一控制器并发调用不会交叉写串口；
 - `stopAll` 和 `emergencyStop` 会尝试操作全部控制器。
 
-## 11. 文件关系
+## 11. 上层应用服务
+
+`FFApplicationService` 是 GUI 或其他上层程序的推荐入口。它持有一个运行时 `FF`，并负责在加载/应用配置时注入 Simulation 或 MightyZap 后端、覆盖运行时串口和限制活动 Channel 数。其方法内部带锁；应用层不应同时绕过它直接驱动同一台 `FF`。
+
+典型流程：
+
+```cpp
+ff::FFApplicationService service;
+auto loaded = service.loadConfig("ff_config.json", true); // true = Simulation
+if (!loaded || !service.connect()) return;
+
+const ff::RodTarget target{{ff::ChannelId::CH1, 0}, 1200, 20.0};
+auto checked = service.validateRodTargets({target}); // 只验证，不下发
+if (checked) service.setRodTarget(target);           // 验证并下发
+```
+
+- `loadConfig()` / `applyConfig()`：只能在断开后调用；会先执行配置校验。
+- `setRodTarget()` / `setRodTargets()`：通过 `FF::submitMotion()`；该路径会刷新所有 Channel 状态，并对完整请求执行地址、限位、禁区、拓扑和间隙校验。
+- `validateRodTargets()`：刷新后只校验，不发送命令。
+- `previewPlan()`：根据当前快照生成计划，不连接也可调用；计划必须在同一 `configVersion` 下执行。
+- `executePlan()`：逐步下发计划并等待每根 Rod 达到配置的 `positionTolerance`、持续 `stableTime`；超时、报警或配置版本变化即失败，不自动恢复。
+- `cancelMotion()` 与 `emergencyStop()`：调用整机停止；软件停止不能替代独立硬件回路。
+
+## 12. Training 公共接口
+
+Training API 位于 `ff/Training.hpp`，与 GUI 解耦。`TrainingSession` 使用 schema `FF-TRAIN-1` 保存扫描设置、样本、谷值候选、分配结果、保存瞬间的 Rod 状态和可执行目标集；会话必须携带 `machineId` 与 `configVersion`，上层在执行前应核对二者。
+
+`TrainingAnalysis` 提供灰度能量累加、仿真扫描能量、谷值检测、Layer 2 杆位的一对一最小行程分配、拖拽可行区间，以及会话 JSON 的读写。`training_rod_id` 始终由机台配置指定，必须是同 Channel 的 Layer 2 Rod。`ItekEnergySource` 是硬件采集扩展点；当前发行版不捆绑经验证的 Itek DLL 或相机配置，因此真实采集不可用，不能把 Simulation 扫描结果用于光学或机械验收。
+
+## 13. 文件关系
 
 ```text
 include/ff/FF.hpp                      公共对象模型和接口
@@ -257,7 +292,7 @@ MightyZapControllerBackend.cpp          MightyZap SDK 适配层
 CppDllMightyZap_Ver2010.h/.lib/.dll     厂商 SDK
 ```
 
-## 12. CSV/JSON 转换工具
+## 14. CSV/JSON 转换工具
 
 转换脚本位于 `tools/ff_config_convert.py`，仅使用 Python 标准库，不依赖第三方 JSON/CSV 包。
 

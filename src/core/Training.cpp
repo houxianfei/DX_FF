@@ -123,7 +123,8 @@ bool safeTopology(const FFChannelConfig &channel, const ChannelStatus &status,
     const auto *rightRod = rodById(channel, right);
     if (!leftRod || !rightRod || !position(member.rod, leftPosition) ||
         !position(right, rightPosition) ||
-        optical(*rightRod, rightPosition) - optical(*leftRod, leftPosition) <
+        optical(*rightRod, rightPosition) - optical(*leftRod, leftPosition) +
+                kLayerClearanceToleranceMm <
             rule->minimumClearanceMm) return false;
   }
   return true;
@@ -280,6 +281,156 @@ Result<RodAimAssignment> TrainingAnalysis::assign(const FFConfig &config, const 
       [&](const RodConfig &rod) { return isLayer2TrainingRod(channel, rod.id) && (!excludedRod || rod.id != *excludedRod); }));
   if (candidates.size() > trainingRodCount) return Result<RodAimAssignment>::failure(ErrorCode::InvalidTarget, "More candidates than available Layer 2 training Rods");
   if (candidates.empty()) return Result<RodAimAssignment>::success({{}, 0.0, "No candidate positions"});
+
+  if (const auto ranksByRod = orderedLayer2Ranks(channel)) {
+    std::vector<int> chain;
+    for (size_t index = 0; index < ranksByRod->size(); ++index)
+      if ((*ranksByRod)[index] >= 0) chain.push_back(static_cast<int>(index));
+    std::sort(chain.begin(), chain.end(), [&](int a, int b) {
+      return (*ranksByRod)[a] < (*ranksByRod)[b];
+    });
+    std::vector<int> candidateOrder(candidates.size());
+    for (size_t index = 0; index < candidateOrder.size(); ++index)
+      candidateOrder[index] = static_cast<int>(index);
+    std::sort(candidateOrder.begin(), candidateOrder.end(),
+              [&](int a, int b) { return candidates[a] < candidates[b]; });
+
+    double bestCost = std::numeric_limits<double>::infinity();
+    std::vector<int> bestEncoders, bestCandidateAtRank, chosenRanks;
+    const auto clearanceBetween = [&](int leftIndex, int rightIndex,
+                                      double &clearance) {
+      const auto &left = channel.rods[leftIndex];
+      const auto &right = channel.rods[rightIndex];
+      const auto rule = std::find_if(
+          channel.clearanceRules.begin(), channel.clearanceRules.end(),
+          [&](const PairClearanceRule &entry) {
+            return entry.layer == 2 &&
+                   ((entry.first == left.id && entry.second == right.id) ||
+                    (entry.second == left.id && entry.first == right.id));
+          });
+      if (rule == channel.clearanceRules.end()) return false;
+      clearance = rule->minimumClearanceMm - kLayerClearanceToleranceMm;
+      return true;
+    };
+    const auto tryPlan = [&]() {
+      std::vector<int> candidateAtRank(chain.size(), -1);
+      for (size_t index = 0; index < chosenRanks.size(); ++index)
+        candidateAtRank[chosenRanks[index]] = candidateOrder[index];
+      std::vector<int> encoders(chain.size());
+      std::vector<double> actualMms(chain.size()), lowMms(chain.size());
+      std::vector<bool> movableRanks(chain.size());
+      double previousMm = 0.0;
+      for (size_t rank = 0; rank < chain.size(); ++rank) {
+        const int rodIndex = chain[rank];
+        const auto &rod = channel.rods[rodIndex];
+        if (rodIndex >= static_cast<int>(state.rods.size()) ||
+            !state.rods[rodIndex].positionValid || std::abs(rod.p1) < 1e-12)
+          return;
+        const double low = std::min(optical(rod, rod.softMin), optical(rod, rod.softMax));
+        const double high = std::max(optical(rod, rod.softMin), optical(rod, rod.softMax));
+        lowMms[rank] = low;
+        double required = low;
+        if (rank > 0) {
+          double clearance{};
+          if (!clearanceBetween(chain[rank - 1], rodIndex, clearance)) return;
+          required = std::max(required, previousMm + clearance);
+        }
+        const bool assigned = candidateAtRank[rank] >= 0;
+        // Every member of this ordered Layer 2 chain may need to participate
+        // in the safe layout. Candidate selection still excludes Rods that
+        // also belong to another layer, but leaving such an endpoint fixed
+        // can make an otherwise valid chain impossible to place.
+        const bool movable = true;
+        movableRanks[rank] = movable;
+        const double currentMm = optical(rod, state.rods[rodIndex].actualPosition);
+        double requestedMm = assigned ? candidates[candidateAtRank[rank]] : currentMm;
+        if (!assigned && movable) requestedMm = std::max(requestedMm, required);
+        if (!assigned && !movable && currentMm + 1e-9 < required) return;
+        // A movable right-end Rod may reach its limit before its predecessor.
+        // Keep it at the legal limit and let the backward pass move preceding
+        // non-candidate Rods left to satisfy the complete chain.
+        if (!assigned) requestedMm = std::min(requestedMm, high);
+        int encoder = static_cast<int>(std::lround((requestedMm - rod.p0) / rod.p1));
+        const int step = rod.p1 > 0.0 ? 1 : -1;
+        while (legalEncoder(rod, encoder) && optical(rod, encoder) + 1e-9 < required)
+          encoder += step;
+        if (!legalEncoder(rod, encoder)) return;
+        const double actualMm = optical(rod, encoder);
+        if (actualMm + 1e-9 < required) return;
+        encoders[rank] = encoder;
+        previousMm = actualMm;
+        actualMms[rank] = actualMm;
+      }
+      // Respect fixed right-end Rods too.  A training Rod at its previous
+      // maximum must be allowed to retreat just enough for its right neighbor.
+      for (int rank = static_cast<int>(chain.size()) - 2; rank >= 0; --rank) {
+        double clearance{};
+        if (!clearanceBetween(chain[rank], chain[rank + 1], clearance)) return;
+        const double maximum = actualMms[rank + 1] - clearance;
+        if (actualMms[rank] <= maximum + 1e-9) continue;
+        if (candidateAtRank[rank] >= 0 || !movableRanks[rank]) return;
+        const auto &rod = channel.rods[chain[rank]];
+        int encoder = static_cast<int>(std::lround((maximum - rod.p0) / rod.p1));
+        const int step = rod.p1 > 0.0 ? -1 : 1;
+        while (legalEncoder(rod, encoder) && optical(rod, encoder) > maximum + 1e-9)
+          encoder += step;
+        if (!legalEncoder(rod, encoder)) return;
+        const double actualMm = optical(rod, encoder);
+        if (actualMm + 1e-9 < lowMms[rank]) return;
+        encoders[rank] = encoder;
+        actualMms[rank] = actualMm;
+      }
+      std::vector<std::pair<RodId, std::int32_t>> overrides;
+      double cost = 0.0;
+      for (size_t rank = 0; rank < chain.size(); ++rank) {
+        if (rank > 0) {
+          double clearance{};
+          if (!clearanceBetween(chain[rank - 1], chain[rank], clearance) ||
+              actualMms[rank] + 1e-9 < actualMms[rank - 1] + clearance)
+            return;
+        }
+        const int rodIndex = chain[rank];
+        overrides.push_back({channel.rods[rodIndex].id, encoders[rank]});
+        cost += std::abs(double(encoders[rank] - state.rods[rodIndex].actualPosition));
+      }
+      if (!safeTopology(channel, state, overrides) || cost >= bestCost) return;
+      bestCost = cost;
+      bestEncoders = std::move(encoders);
+      bestCandidateAtRank = std::move(candidateAtRank);
+    };
+    std::function<void(size_t, int)> chooseRanks = [&](size_t depth, int begin) {
+      if (depth == candidateOrder.size()) { tryPlan(); return; }
+      for (int rank = begin;
+           rank <= static_cast<int>(chain.size() - (candidateOrder.size() - depth));
+           ++rank) {
+        const auto &rod = channel.rods[chain[rank]];
+        if (!isLayer2TrainingRod(channel, rod.id) ||
+            (excludedRod && rod.id == *excludedRod))
+          continue;
+        chosenRanks.push_back(rank);
+        chooseRanks(depth + 1, rank + 1);
+        chosenRanks.pop_back();
+      }
+    };
+    chooseRanks(0, 0);
+    if (std::isfinite(bestCost)) {
+      RodAimAssignment result;
+      result.totalEncoderTravel = bestCost;
+      result.message = "Minimum-travel assignment with Layer 2 evasion is valid";
+      for (size_t rank = 0; rank < chain.size(); ++rank) {
+        const int rodIndex = chain[rank];
+        const auto &rod = channel.rods[rodIndex];
+        const int candidateIndex = bestCandidateAtRank[rank];
+        const bool assigned = candidateIndex >= 0;
+        result.aims.push_back({{channelId, rod.id},
+                               assigned ? candidates[candidateIndex]
+                                        : optical(rod, state.rods[rodIndex].actualPosition),
+                               optical(rod, bestEncoders[rank]), bestEncoders[rank],
+                               state.rods[rodIndex].actualPosition, assigned});
+      }
+      return Result<RodAimAssignment>::success(std::move(result));
+    }
+  }
   struct Option { int rod; std::int32_t encoder; double cost; };
   std::vector<std::vector<Option>> options(candidates.size());
   for (size_t c = 0; c < candidates.size(); ++c) for (size_t r = 0; r < channel.rods.size(); ++r) {
@@ -333,73 +484,10 @@ Result<RodAimAssignment> TrainingAnalysis::assign(const FFConfig &config, const 
 Result<void> TrainingAnalysis::validateAssignment(
     const FFConfig &config, const FFStatus &status, ChannelId channelId,
     const std::vector<double> &candidates, std::optional<RodId> excludedRod) {
-  const int ci = static_cast<int>(channelId);
-  if (ci < 0 || ci >= 3)
-    return Result<void>::failure(ErrorCode::InvalidTarget, "Invalid training channel");
-  const auto &channel = config.channels[ci];
-  const auto &state = status.channels[ci];
-  const auto trainingRodCount = static_cast<size_t>(std::count_if(
-      channel.rods.begin(), channel.rods.end(),
-      [&](const RodConfig &rod) { return isLayer2TrainingRod(channel, rod.id) && (!excludedRod || rod.id != *excludedRod); }));
-  if (candidates.size() > trainingRodCount)
-    return Result<void>::failure(ErrorCode::InvalidTarget,
-                                 "More candidates than available Layer 2 training Rods");
-  if (candidates.empty()) return Result<void>::success();
-
-  struct Option { int rod; std::int32_t encoder; };
-  std::vector<std::vector<Option>> options(candidates.size());
-  for (size_t c = 0; c < candidates.size(); ++c) {
-    for (size_t r = 0; r < channel.rods.size(); ++r) {
-      const auto &rod = channel.rods[r];
-      if (!isLayer2TrainingRod(channel, rod.id) || (excludedRod && rod.id == *excludedRod) || std::abs(rod.p1) < 1e-12 || r >= state.rods.size() ||
-          !state.rods[r].positionValid)
-        continue;
-      const auto encoder = static_cast<std::int32_t>(
-          std::lround((candidates[c] - rod.p0) / rod.p1));
-      if (legalEncoder(rod, encoder)) options[c].push_back({int(r), encoder});
-    }
-    if (options[c].empty())
-      return Result<void>::failure(ErrorCode::LimitViolation,
-                                   "A candidate is outside every Rod's legal range");
-  }
-
-  std::vector<int> order(candidates.size());
-  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
-  const auto orderedRanks = orderedLayer2Ranks(channel);
-  if (orderedRanks) {
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-      return candidates[a] < candidates[b];
-    });
-  } else {
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-      return options[a].size() < options[b].size();
-    });
-  }
-  std::vector<Option> selected(candidates.size());
-  std::vector<bool> used(channel.rods.size());
-  std::function<bool(size_t, int)> search = [&](size_t depth, int previousRank) {
-    if (depth == order.size()) {
-      std::vector<std::pair<RodId, std::int32_t>> overrides;
-      overrides.reserve(selected.size());
-      for (const auto &option : selected)
-        overrides.push_back({channel.rods[option.rod].id, option.encoder});
-      return safeTopology(channel, state, overrides);
-    }
-    const int candidate = order[depth];
-    for (const auto &option : options[candidate]) {
-      if (used[option.rod]) continue;
-      const int rank = orderedRanks ? (*orderedRanks)[option.rod] : -1;
-      if (orderedRanks && (rank < 0 || rank <= previousRank)) continue;
-      used[option.rod] = true;
-      selected[candidate] = option;
-      if (search(depth + 1, orderedRanks ? rank : previousRank)) return true;
-      used[option.rod] = false;
-    }
-    return false;
-  };
-  if (!search(0, -1))
-    return Result<void>::failure(ErrorCode::SafetyViolation,
-                                 "No one-to-one assignment satisfies layer clearance");
+  const auto assignment = assign(config, status, channelId, candidates,
+                                 excludedRod);
+  if (!assignment)
+    return Result<void>::failure(assignment.error, assignment.message);
   return Result<void>::success();
 }
 

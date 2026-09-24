@@ -17,16 +17,20 @@ struct FFApplicationService::Impl {
 Result<void> FFApplicationService::replaceMachine(
     FFConfig config, bool sim, const std::array<std::string, 3> &serialPorts,
     int activeChannelCount) {
-  auto valid = FFConfigIO::validate(config);
-  if (!valid)
-    return valid;
+  // The JSON stores editable/default connection values.  Resolve the actual
+  // runtime ports first so Simulation and disabled channels are not rejected
+  // because of blank or duplicate defaults in the file.
   activeChannelCount = std::clamp(activeChannelCount, 1, 3);
   for (int i = 0; i < 3; ++i) {
     if (sim || i >= activeChannelCount)
-      config.channels[i].controller.serial.portName = "SIM-CH" + std::to_string(i + 1);
-    else if (!serialPorts[i].empty())
+      config.channels[i].controller.serial.portName =
+          "SIM-CH" + std::to_string(i + 1);
+    else
       config.channels[i].controller.serial.portName = serialPorts[i];
   }
+  auto valid = FFConfigIO::validate(config);
+  if (!valid)
+    return valid;
   std::array<std::unique_ptr<IControllerBackend>, 3> backends;
   for (int i = 0; i < 3; ++i)
     backends[i] = (sim || i >= activeChannelCount) ? makeSimulationBackend()
@@ -105,6 +109,15 @@ Result<void> FFApplicationService::refresh() {
   if (!impl_->machine)
     return Result<void>::failure(ErrorCode::NotReady);
   auto x = impl_->machine->refreshStatus();
+  if (impl_->callback)
+    impl_->callback(impl_->machine->status());
+  return x;
+}
+Result<void> FFApplicationService::refreshRod(RodAddress address) {
+  std::lock_guard l(impl_->mutex);
+  if (!impl_->machine)
+    return Result<void>::failure(ErrorCode::NotReady);
+  auto x = impl_->machine->refreshRodStatus(address);
   if (impl_->callback)
     impl_->callback(impl_->machine->status());
   return x;

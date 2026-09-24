@@ -14,6 +14,11 @@
 
 namespace ff {
 
+// Optical-position resolution used when comparing layer-clearance boundaries.
+// A measured gap may be this much smaller than the configured minimum without
+// being treated as a safety violation.
+inline constexpr double kLayerClearanceToleranceMm = 0.10;
+
 enum class ChannelId : std::uint8_t { CH1 = 0, CH2 = 1, CH3 = 2 };
 using RodId = std::uint8_t;
 
@@ -319,6 +324,7 @@ public:
   Result<void> disconnect();
   bool isConnected() const noexcept;
   Result<void> refreshStatus();
+  Result<void> refreshStatus(RodId);
   Result<void> enable(RodId, bool);
   Result<void> home(RodId);
   Result<void> submit(RodTarget);
@@ -392,6 +398,7 @@ public:
   Result<void> connect();
   Result<void> disconnect();
   Result<void> refreshStatus();
+  Result<void> refreshRodStatus(RodAddress);
   Result<ChannelSafetyStatus> refreshChannelSafety(ChannelId id);
   ChannelSafetyStatus channelSafety(ChannelId id) const;
   Result<MotionReceipt> submitMotion(const MotionRequest &request);
@@ -439,6 +446,7 @@ public:
   Result<void> connect();
   Result<void> disconnect();
   Result<void> refresh();
+  Result<void> refreshRod(RodAddress);
   // Demo-style single-Rod control. The target is fully validated by the FF
   // safety layer before it is sent to either backend.
   Result<void> setRodTarget(const RodTarget &);
