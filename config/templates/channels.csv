@@ -1,0 +1,4 @@
+channel_id,controller_name,port,baud_rate,timeout_ms,poll_period_ms,retry_count,training_rod_id
+CH1,CTRL-CH1,COM3,57600,500,20,3,12
+CH2,CTRL-CH2,COM4,57600,500,20,3,
+CH3,CTRL-CH3,COM5,57600,500,20,3,

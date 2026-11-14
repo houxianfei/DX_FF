@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local build output
+build/
+out/
+cmake-build-*/
+x64/
+**/x64/
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.obj
+*.tlog/
+
+# Generated configuration and inspection artifacts
+generated/
+outputs/
+.codex_artifacts/
+FF_SDK/
+publish/
+imgui.ini
+
+# Excel temporary lock files
+~$*.xlsx
+
+# Local IDE and OS files
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,3 @@
+param([string]$Configuration="Release",[switch]$SkipPackage)
+$ErrorActionPreference="Stop";$root=Resolve-Path (Join-Path $PSScriptRoot "..");if(!$SkipPackage){& powershell -ExecutionPolicy Bypass -File (Join-Path $root "tools\package_ff_gui_app.ps1") -Configuration $Configuration;if($LASTEXITCODE){throw "Package failed"}}
+$iscc=Get-Command ISCC.exe -ErrorAction SilentlyContinue;$isccPath=if($iscc){$iscc.Source}else{"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"};if(!(Test-Path $isccPath)){throw "ISCC.exe not found"};& $isccPath (Join-Path $root "installer\ff_gui.iss");if($LASTEXITCODE){throw "Installer failed"}
