@@ -8,8 +8,9 @@ FF 是一套包含 3 个 Channel 和多根 MightyZap 遮挡棒的整机控制、
 | --- | --- |
 | `include/DX_FF.h` | SDK 对象入口头文件；自动包含 `DX_FF_Types.h` |
 | `include/DX_FF_Types.h` | SDK 公开数据结构、结果码与状态定义 |
+| `include/DX_FF_MotionPolicy.h` | SDK 固定运动速度宏，修改后需重新构建 SDK |
 | `include/ff/` | SDK DLL 内部实现头文件，不随 SDK 交付 |
-| `app/` | GUI 入口，以及按设置、仪表盘、训练和参数编辑拆分的界面实现 |
+| `app/` | GUI 入口、按职责拆分的界面实现，以及显式接收驱动实例的 SDK 适配层 |
 | `src/core/` | 核心控制、训练、配置与 SDK 适配实现 |
 | `third_party/imgui/` | GUI 所用的 ImGui、ImPlot 和文件对话框源码 |
 | `third_party/MightyZap/` | MightyZap 厂商 SDK 的头文件、导入库和运行时 DLL |
@@ -56,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File tools/build_ff_gui_installer.ps1 -Confi
 
 ## SDK 发布
 
-SDK 发布包面向 Windows x64 / VS2019 v142 / C++17 集成。它包含对象入口 `DX_FF.h` 和数据结构 `DX_FF_Types.h`，以及 DLL、导入库、MightyZap 运行时依赖、配置样例和中文接口文档。集成方仍只需包含 `<DX_FF.h>`。GUI 构建会先生成匹配配置的 SDK。单独构建 SDK：
+SDK 发布包面向 Windows x64 / VS2019 v142 / C++17 集成。它包含对象入口 `DX_FF.h`、数据结构 `DX_FF_Types.h` 和运动策略 `DX_FF_MotionPolicy.h`，以及 DLL、导入库、MightyZap 运行时依赖、配置样例和中文接口文档。集成方仍只需包含 `<DX_FF.h>`。GUI 构建会先生成匹配配置的 SDK。单独构建 SDK：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package_ff_sdk.ps1 -Configuration Release

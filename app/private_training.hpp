@@ -3,6 +3,7 @@
 #include "private_config.hpp"
 
 namespace ff {
+class GuiDriver;
 
 enum class TrainingSource { Sim1, Sim2, Real, Loaded };
 
@@ -70,33 +71,42 @@ struct TrainingSession {
   bool complete{false};
 };
 
+struct GuiTrainingArchive {
+  std::string machineId, configVersion;
+  std::int64_t createdUnixSeconds{0};
+  int selectedChannel{0};
+  std::array<std::optional<TrainingSession>,3> channels{};
+};
+
 class GuiTrainingAnalysis {
 public:
-  static std::uint64_t simulatedEnergy(TrainingSource source, double positionMm,
+  static std::uint64_t simulatedEnergy(GuiDriver&, TrainingSource source, double positionMm,
                                         double startMm, double endMm);
-  static double interpolateEnergy(const std::vector<TrainingSample> &samples,
+  static double interpolateEnergy(GuiDriver&, const std::vector<TrainingSample> &samples,
                                   double positionMm);
-  static std::vector<double> findValleys(const std::vector<TrainingSample> &,
+  static std::vector<double> findValleys(GuiDriver&, const std::vector<TrainingSample> &,
                                          const ValleyDetectionSettings &);
   // Finds the minimum-total-travel legal one-to-one Rod assignment. For an
   // ordered Layer 2 chain, non-candidate Rods receive safe evasion targets
   // when needed so parked Rods do not block candidate allocation.
   static Result<RodAimAssignment>
-  assign(const FFConfig &, const FFStatus &, ChannelId,
+  assign(GuiDriver&, const FFConfig &, const FFStatus &, ChannelId,
          const std::vector<double> &candidateMm,
          std::optional<RodId> excludedRod = std::nullopt);
   // Exact feasibility check for interactive editing.  Unlike assign(), it
   // stops at the first safe one-to-one mapping and does not optimize travel.
-  static Result<void> validateAssignment(const FFConfig &, const FFStatus &,
+  static Result<void> validateAssignment(GuiDriver&, const FFConfig &, const FFStatus &,
                                          ChannelId,
                                          const std::vector<double> &candidateMm,
                                          std::optional<RodId> excludedRod = std::nullopt);
-  static TrainingDragInterval dragInterval(
+  static TrainingDragInterval dragInterval(GuiDriver&,
       const std::vector<double> &candidateMm, std::size_t movingIndex,
       double anchorMm, double scanStartMm, double scanEndMm,
       double windowWidthMm = 3.0);
-  static Result<void> saveSession(const std::string &, const TrainingSession &);
-  static Result<TrainingSession> loadSession(const std::string &);
+  static Result<void> saveSession(GuiDriver&, const std::string &, const TrainingSession &);
+  static Result<TrainingSession> loadSession(GuiDriver&, const std::string &);
+  static Result<void> saveArchive(GuiDriver&, const std::string &, const GuiTrainingArchive &);
+  static Result<GuiTrainingArchive> loadArchive(GuiDriver&, const std::string &);
 };
 
 } // namespace ff

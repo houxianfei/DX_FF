@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 CHANNELS = ("CH1", "CH2", "CH3")
+MOTION_FIELDS = ("position_tolerance", "stable_time_ms", "move_timeout_ms")
+MOTOR_FIELDS = ("speed_limit_raw", "acceleration_raw", "deceleration_raw")
+COORDINATE_UNITS = {"encoder_position": "count", "optical_position": "mm"}
 SYSTEM_FIELDS = ("machine_id", "config_version", "max_active_rod_count", "status_expiration_ms")
 CHANNEL_FIELDS = (
     "channel_id", "controller_name", "port", "baud_rate", "timeout_ms",
@@ -24,7 +27,7 @@ ROD_FIELDS = (
 ROD_LAYER_FIELDS = ("channel_id", "rod_id", "layer", "role", "left_neighbor", "right_neighbor")
 RANGE_FIELDS = ("channel_id", "rod_id", "range_kind", "min_position", "max_position")
 PAIR_FIELDS = ("channel_id", "layer", "rod_a", "rod_b", "minimum_clearance_mm")
-INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "training_rod_id", "rod_id", "rod_a", "rod_b", "layer", "role", "left_neighbor", "right_neighbor", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "min_position", "max_position"}
+INT_FIELDS = {"max_active_rod_count", "status_expiration_ms", "baud_rate", "timeout_ms", "poll_period_ms", "retry_count", "training_rod_id", "rod_id", "rod_a", "rod_b", "layer", "role", "left_neighbor", "right_neighbor", "hard_min", "hard_max", "soft_min", "soft_max", "zero_position", "safe_position", "inward_direction", "position_tolerance", "stable_time_ms", "move_timeout_ms", "min_position", "max_position", *MOTOR_FIELDS}
 FLOAT_FIELDS = {"P0", "P1", "max_velocity", "max_acceleration", "max_deceleration", "minimum_clearance_mm"}
 BOOL_FIELDS = {"safe_position_valid"}
 
@@ -76,6 +79,22 @@ def required(row: dict[str, Any], field: str, source: str) -> Any:
 
 def validate_config(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    motion = config.get("rod_motion")
+    if motion is not None:
+        if motion.get("coordinate_system") != "encoder_counts":
+            errors.append("rod_motion.coordinate_system 必须为 encoder_counts")
+        for field in MOTION_FIELDS:
+            value = motion.get(field)
+            if not isinstance(value, (int, float)) or value < 0:
+                errors.append(f"rod_motion.{field} 必须为非负数")
+    motor = config.get("motor_parameters")
+    if motor is not None:
+        for field, minimum, maximum in (("speed_limit_raw", 1, 1023), ("acceleration_raw", 0, 255), ("deceleration_raw", 0, 255)):
+            value = motor.get(field)
+            if not isinstance(value, int) or not minimum <= value <= maximum:
+                errors.append(f"motor_parameters.{field} 必须在 {minimum}..{maximum} 内")
+    if config.get("coordinate_units", COORDINATE_UNITS) != COORDINATE_UNITS:
+        errors.append("coordinate_units 必须使用 count、mm")
     channels = config.get("channels")
     if not isinstance(channels, list) or len(channels) != 3:
         errors.append("channels 必须恰好包含 CH1、CH2、CH3")
@@ -101,6 +120,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             seen_rods.add(rid)
             if rod.get("hard_min", 0) > rod.get("hard_max", 0):
                 errors.append(f"{cid}/Rod{rid}: hard_min > hard_max")
+            if not 0 <= rod.get("hard_min", 0) <= 4095 or not 0 <= rod.get("hard_max", 0) <= 4095:
+                errors.append(f"{cid}/Rod{rid}: 设备行程限位必须在 0..4095 内")
             if rod.get("soft_min", 0) < rod.get("hard_min", 0) or rod.get("soft_max", 0) > rod.get("hard_max", 0) or rod.get("soft_min", 0) > rod.get("soft_max", 0):
                 errors.append(f"{cid}/Rod{rid}: 软件限位不在硬限位内")
             if rod.get("safe_position_valid") and not (rod.get("soft_min", 0) <= rod.get("safe_position", 0) <= rod.get("soft_max", 0)):
@@ -144,6 +165,12 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
     layer_rows = read_csv(directory / "rod_layers.csv", ROD_LAYER_FIELDS)
     range_rows = read_csv(directory / "safety_ranges.csv", RANGE_FIELDS)
     pair_rows = read_csv(directory / "pair_clearance_rules.csv", PAIR_FIELDS)
+    motion_rows = read_csv(directory / "motion.csv", MOTION_FIELDS)
+    motor_rows = read_csv(directory / "motor.csv", MOTOR_FIELDS)
+    if motion_rows and len(motion_rows) != 1:
+        fail("motion.csv 必须恰好有一行")
+    if motor_rows and len(motor_rows) != 1:
+        fail("motor.csv 必须恰好有一行")
     if len(system_rows) != 1:
         fail("system.csv 必须恰好有一行")
     if len(channel_rows) != 3:
@@ -171,6 +198,16 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
             if field.endswith("_ms"):
                 key = field
             rod[key] = row[field]
+        if motion_rows:
+            for field in MOTION_FIELDS:
+                if rod[field] != motion_rows[0][field]:
+                    fail(f"{cid}/Rod{rod['id']}: {field} 与 motion.csv 不一致")
+                del rod[field]
+        if motor_rows:
+            for field, old_field in (("speed_limit_raw", "max_velocity"), ("acceleration_raw", "max_acceleration"), ("deceleration_raw", "max_deceleration")):
+                if rod[old_field] != motor_rows[0][field]:
+                    fail(f"{cid}/Rod{rod['id']}: {old_field} 与 motor.csv 不一致")
+                del rod[old_field]
         by_channel[cid]["rods"].append(rod)
     for row in layer_rows:
         ch = by_channel.get(row.get("channel_id"));
@@ -187,6 +224,12 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
         if ch is None: fail(f"pair_clearance_rules.csv 引用了不存在的 Channel: {row.get('channel_id')}")
         ch["clearance_rules"].append({"layer": row["layer"], "rod_a": row["rod_a"], "rod_b": row["rod_b"], "minimum_clearance_mm": row["minimum_clearance_mm"]})
     config = {"schema": "ff-config", "schema_version": 2, "machine_id": required(system, "machine_id", "system.csv"), "config_version": required(system, "config_version", "system.csv"), "max_active_rod_count": system["max_active_rod_count"], "status_expiration_ms": system["status_expiration_ms"], "channels": channels}
+    if motion_rows:
+        config["coordinate_units"] = COORDINATE_UNITS.copy()
+        config["rod_motion"] = {"coordinate_system": "encoder_counts", **motion_rows[0]}
+    if motor_rows:
+        config["coordinate_units"] = COORDINATE_UNITS.copy()
+        config["motor_parameters"] = motor_rows[0]
     errors = validate_config(config)
     if errors:
         fail("配置校验失败:\n- " + "\n- ".join(errors))
@@ -206,6 +249,10 @@ def json_to_csv(config: dict[str, Any], directory: Path) -> None:
         fail("JSON 配置校验失败:\n- " + "\n- ".join(errors))
     directory.mkdir(parents=True, exist_ok=True)
     write_csv(directory / "system.csv", SYSTEM_FIELDS, [{"machine_id": config.get("machine_id", ""), "config_version": config.get("config_version", ""), "max_active_rod_count": config.get("max_active_rod_count", 0), "status_expiration_ms": config.get("status_expiration_ms", 200)}])
+    write_csv(directory / "motion.csv", MOTION_FIELDS,
+              [config["rod_motion"]] if "rod_motion" in config else [])
+    write_csv(directory / "motor.csv", MOTOR_FIELDS,
+              [config["motor_parameters"]] if "motor_parameters" in config else [])
     channels = []
     rods = []
     layers = []
@@ -216,6 +263,10 @@ def json_to_csv(config: dict[str, Any], directory: Path) -> None:
         channels.append({"channel_id": ch["id"], "controller_name": ch.get("controller", {}).get("name", ""), "port": serial.get("port", ""), "baud_rate": serial.get("baud_rate", 115200), "timeout_ms": serial.get("timeout_ms", 500), "poll_period_ms": ch.get("controller", {}).get("poll_period_ms", 20), "retry_count": ch.get("controller", {}).get("retry_count", 3), "training_rod_id": ch.get("training_rod_id")})
         for rod in ch.get("rods", []):
             row = {"channel_id": ch["id"], "rod_id": rod.get("id", ""), **rod}
+            if "rod_motion" in config:
+                row.update({field: config["rod_motion"][field] for field in MOTION_FIELDS})
+            if "motor_parameters" in config:
+                row.update({old: config["motor_parameters"][new] for old, new in (("max_velocity", "speed_limit_raw"), ("max_acceleration", "acceleration_raw"), ("max_deceleration", "deceleration_raw"))})
             rods.append(row)
         for member in ch.get("layer_members", []): layers.append({"channel_id": ch["id"], **member})
         for rod in ch.get("rods", []):
@@ -226,6 +277,35 @@ def json_to_csv(config: dict[str, Any], directory: Path) -> None:
     write_csv(directory / "rod_layers.csv", ROD_LAYER_FIELDS, layers)
     write_csv(directory / "safety_ranges.csv", RANGE_FIELDS, ranges)
     write_csv(directory / "pair_clearance_rules.csv", PAIR_FIELDS, pairs)
+
+
+def format_config(config: dict[str, Any]) -> str:
+    lines = ["{"]
+    items = list(config.items())
+    for index, (key, value) in enumerate(items):
+        suffix = "," if index + 1 < len(items) else ""
+        if key != "channels":
+            lines.append("  " + json.dumps(key, ensure_ascii=False) + ": " + json.dumps(value, ensure_ascii=False) + suffix)
+            continue
+        lines.append('  "channels": [')
+        for channel_index, channel in enumerate(value):
+            channel_suffix = "," if channel_index + 1 < len(value) else ""
+            lines.append("    {")
+            fields = list(channel.items())
+            for field_index, (field, field_value) in enumerate(fields):
+                field_suffix = "," if field_index + 1 < len(fields) else ""
+                if field in ("layer_members", "clearance_rules", "rods"):
+                    lines.append("      " + json.dumps(field) + ": [")
+                    for item_index, item in enumerate(field_value):
+                        item_suffix = "," if item_index + 1 < len(field_value) else ""
+                        lines.append("        " + json.dumps(item, ensure_ascii=False, separators=(", ", ": ")) + item_suffix)
+                    lines.append("      ]" + field_suffix)
+                else:
+                    lines.append("      " + json.dumps(field) + ": " + json.dumps(field_value, ensure_ascii=False, separators=(", ", ": ")) + field_suffix)
+            lines.append("    }" + channel_suffix)
+        lines.append("  ]" + suffix)
+    lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
@@ -240,7 +320,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "csv-to-json":
-            config = csv_to_json(args.csv_dir); args.json_file.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); print(f"已生成 {args.json_file}")
+            config = csv_to_json(args.csv_dir)
+            args.json_file.write_text(format_config(config), encoding="utf-8")
+            print(f"已生成 {args.json_file}")
         elif args.command == "json-to-csv":
             json_to_csv(json.loads(args.json_file.read_text(encoding="utf-8")), args.csv_dir); print(f"已生成 {args.csv_dir}")
         else:

@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "DX_FF_MotionPolicy.h"
 
 #if defined(FF_APPLICATION_EXPORTS)
 #define FF_SDK_API __declspec(dllexport)
@@ -21,6 +22,8 @@
 #endif
 
 namespace ff {
+
+inline constexpr int kMotionSpeed = FF_MOTION_SPEED;
 
 // Optical-position resolution used when comparing layer-clearance boundaries.
 // A measured gap may be this much smaller than the configured minimum without
@@ -122,14 +125,16 @@ struct SerialConfig {
 struct RodConfig {
   RodId id{};
   std::string name;
+  // Position limits and targets are encoder counts; optical positions are mm.
   std::int32_t hardMin{0}, hardMax{0};
   std::int32_t softMin{0}, softMax{0};
   std::int32_t zeroPosition{0}, safePosition{0};
   bool safePositionValid{false};
-  // optical_position = P0 + P1*u,
-  // where u is the encoder position.
+  // optical_position_mm = P0(mm) + P1(mm/count) * encoder_count.
   double p0{0.0}, p1{1.0};
   int inwardDirection{1};
+  // Shared JSON motor_parameters raw registers: speed 1..1023,
+  // acceleration/deceleration 0..255. These are not count/s units.
   double maxVelocity{0.0}, maxAcceleration{0.0}, maxDeceleration{0.0};
   std::int32_t positionTolerance{0};
   std::chrono::milliseconds stableTime{0}, moveTimeout{5000};
@@ -213,7 +218,6 @@ struct FFStatus {
 struct RodTarget {
   RodAddress address;
   std::int32_t position{0};
-  double velocity{0.0};
 };
 
 struct MotionRequest {
@@ -237,12 +241,9 @@ struct MotionReceipt {
   }
 };
 
-enum class PlanStepKind { MoveToSafe, MoveToTarget };
 struct MotionPlanStep {
-  PlanStepKind kind{PlanStepKind::MoveToTarget};
   RodAddress address{};
   std::int32_t position{0};
-  double velocity{0.0};
   std::string reason;
 };
 
@@ -281,8 +282,9 @@ public:
   virtual Result<void> configureRods(const std::vector<RodConfig> &) {
     return Result<void>::success();
   }
-  virtual Result<void> setGoal(RodId, std::int32_t, double) = 0;
-  // Must use the controller/bus synchronous-write facility when available.
+  virtual Result<void> setGoal(RodId, std::int32_t) = 0;
+  // Submit one channel's targets as a batch. The current MightyZap adapter
+  // issues GoalPosition commands in sequence after speed was set at open.
   virtual Result<void> setGoalsSynchronous(const std::vector<RodTarget> &) = 0;
   virtual Result<void> stop(RodId) = 0;
   virtual Result<void> stopAll() = 0;
@@ -483,6 +485,7 @@ public:
 
 private:
   Result<void> executeSteps(const std::vector<RodTarget> &, bool scopedRefresh);
+  Result<void> executeGroup(const std::vector<RodTarget> &);
   Result<void> replaceMachine(FFConfig config, bool simulation,
                               const std::array<std::string, 3> &serialPorts,
                               int activeChannelCount);

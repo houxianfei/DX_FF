@@ -51,19 +51,19 @@ TrainingSession fromPublic(const ::FF::TrainingSession& s) {
 }
 } // namespace
 
-std::uint64_t GuiTrainingAnalysis::simulatedEnergy(TrainingSource source,double p,double start,double end) {
-  return activeGuiDriver()->sdk().simulated_energy(static_cast<::FF::TrainingSource>(source),p,start,end);
+std::uint64_t GuiTrainingAnalysis::simulatedEnergy(GuiDriver& driver,TrainingSource source,double p,double start,double end) {
+  return driver.sdk().simulated_energy(static_cast<::FF::TrainingSource>(source),p,start,end);
 }
-double GuiTrainingAnalysis::interpolateEnergy(const std::vector<TrainingSample>& s,double p) {
-  return activeGuiDriver()->sdk().interpolate_energy(samples(s),p);
+double GuiTrainingAnalysis::interpolateEnergy(GuiDriver& driver,const std::vector<TrainingSample>& s,double p) {
+  return driver.sdk().interpolate_energy(samples(s),p);
 }
-std::vector<double> GuiTrainingAnalysis::findValleys(const std::vector<TrainingSample>& s,
+std::vector<double> GuiTrainingAnalysis::findValleys(GuiDriver& driver,const std::vector<TrainingSample>& s,
     const ValleyDetectionSettings& v) {
-  return activeGuiDriver()->sdk().find_valleys(samples(s),settings(v));
+  return driver.sdk().find_valleys(samples(s),settings(v));
 }
-Result<RodAimAssignment> GuiTrainingAnalysis::assign(const FFConfig&,const FFStatus&,
+Result<RodAimAssignment> GuiTrainingAnalysis::assign(GuiDriver& driver,const FFConfig&,const FFStatus&,
     ChannelId channel,const std::vector<double>& candidates,std::optional<RodId> excluded) {
-  auto r=activeGuiDriver()->sdk().assign_training(static_cast<int>(channel),candidates,
+  auto r=driver.sdk().assign_training(static_cast<int>(channel),candidates,
                                                    excluded?int(*excluded):-1);
   if (!r) return Result<RodAimAssignment>::failure(ErrorCode::InvalidTarget,r.result.message);
   RodAimAssignment out;
@@ -74,24 +74,49 @@ Result<RodAimAssignment> GuiTrainingAnalysis::assign(const FFConfig&,const FFSta
     a.requestedMm,a.quantizedMm,a.encoderAim,a.actualEncoder,a.assigned});
   return Result<RodAimAssignment>::success(std::move(out));
 }
-Result<void> GuiTrainingAnalysis::validateAssignment(const FFConfig& c,const FFStatus& s,
+Result<void> GuiTrainingAnalysis::validateAssignment(GuiDriver& driver,const FFConfig& c,const FFStatus& s,
     ChannelId channel,const std::vector<double>& candidates,std::optional<RodId> excluded) {
-  auto r=assign(c,s,channel,candidates,excluded);
+  auto r=assign(driver,c,s,channel,candidates,excluded);
   if (!r) return Result<void>::failure(r.error,r.message);
   return Result<void>::success();
 }
-TrainingDragInterval GuiTrainingAnalysis::dragInterval(const std::vector<double>& candidates,
+TrainingDragInterval GuiTrainingAnalysis::dragInterval(GuiDriver& driver,const std::vector<double>& candidates,
     std::size_t index,double anchor,double start,double end,double width) {
-  auto r=activeGuiDriver()->sdk().drag_interval(candidates,index,anchor,start,end,width);
+  auto r=driver.sdk().drag_interval(candidates,index,anchor,start,end,width);
   return {r.minimumMm,r.maximumMm,r.valid};
 }
-Result<void> GuiTrainingAnalysis::saveSession(const std::string& path,const TrainingSession& session) {
-  return privateResult(activeGuiDriver()->sdk().save_training_session(path,toPublic(session)));
+Result<void> GuiTrainingAnalysis::saveSession(GuiDriver& driver,const std::string& path,const TrainingSession& session) {
+  return privateResult(driver.sdk().save_training_session(path,toPublic(session)));
 }
-Result<TrainingSession> GuiTrainingAnalysis::loadSession(const std::string& path) {
-  auto r=activeGuiDriver()->sdk().load_training_session(path);
+Result<TrainingSession> GuiTrainingAnalysis::loadSession(GuiDriver& driver,const std::string& path) {
+  auto r=driver.sdk().load_training_session(path);
   if (!r) return Result<TrainingSession>::failure(ErrorCode::BackendFailure,r.result.message);
   return Result<TrainingSession>::success(fromPublic(r.value));
+}
+Result<void> GuiTrainingAnalysis::saveArchive(GuiDriver& driver,const std::string& path,
+                                              const GuiTrainingArchive& archive) {
+  ::FF::TrainingArchive value;
+  value.machineId=archive.machineId;
+  value.configVersion=archive.configVersion;
+  value.createdUnixSeconds=archive.createdUnixSeconds;
+  value.selectedChannel=archive.selectedChannel;
+  for (int ch=0;ch<3;++ch)
+    if (archive.channels[ch]) value.channels[ch]=toPublic(*archive.channels[ch]);
+  return privateResult(driver.sdk().save_training_archive(path,value));
+}
+Result<GuiTrainingArchive> GuiTrainingAnalysis::loadArchive(GuiDriver& driver,
+                                                            const std::string& path) {
+  auto loaded=driver.sdk().load_training_archive(path);
+  if (!loaded) return Result<GuiTrainingArchive>::failure(ErrorCode::BackendFailure,
+                                                           loaded.result.message);
+  GuiTrainingArchive out;
+  out.machineId=loaded.value.machineId;
+  out.configVersion=loaded.value.configVersion;
+  out.createdUnixSeconds=loaded.value.createdUnixSeconds;
+  out.selectedChannel=loaded.value.selectedChannel;
+  for (int ch=0;ch<3;++ch)
+    if (loaded.value.channels[ch]) out.channels[ch]=fromPublic(*loaded.value.channels[ch]);
+  return Result<GuiTrainingArchive>::success(std::move(out));
 }
 } // namespace ff
 

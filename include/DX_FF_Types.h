@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,11 +43,10 @@ struct Address {
   int rod{0};
 };
 
-// Encoder target and configured velocity unit.
+// A Rod address and its encoder target. Motion speed is SDK configuration.
 struct Target {
   Address address;
   std::int32_t position{0};
-  double velocity{0};
 };
 
 struct RodPosition {
@@ -56,15 +56,12 @@ struct RodPosition {
   bool valid{false}; // Whether the latest position feedback is usable.
 };
 
-struct TargetPosition {
-  Address address;
-  std::int32_t encoder{0};
-  double opticalMm{0};
-  bool valid{false};
-  double velocity{0};
+struct PositionSet {
+  std::vector<Target> targets;
+  std::string summary;
 };
 
-// Hardware feedback target is distinct from the driver's pending target.
+// Hardware feedback target is distinct from the latest submitted target.
 struct RodStatus {
   Address address;
   std::int32_t actual{0}, target{0};
@@ -120,17 +117,6 @@ struct MachineInfo {
   int activeChannels{0};
 };
 
-struct PlanStep {
-  Target target;
-  bool safePosition{false};
-  std::string reason;
-};
-
-struct Plan {
-  std::string configVersion;
-  std::vector<PlanStep> steps;
-};
-
 struct Sample {
   double positionMm{0};
   std::uint64_t energy{0};
@@ -182,6 +168,13 @@ struct TrainingSession {
   std::string machineId, configVersion;
   std::int64_t createdUnixSeconds{0};
   bool complete{false};
+};
+
+struct TrainingArchive {
+  std::string machineId, configVersion;
+  std::int64_t createdUnixSeconds{0};
+  int selectedChannel{0};
+  std::array<std::optional<TrainingSession>,3> channels{};
 };
 
 } // namespace FF

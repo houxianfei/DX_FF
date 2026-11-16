@@ -10,19 +10,19 @@ int main(int argc, char** argv) {
   FF::ff_driver driver;
   auto opened = driver.open(argv[1], FF::Mode::Simulation);
   if (!opened) { std::cerr << opened.message << '\n'; return 1; }
-  auto initial = driver.initialize(argv[2]);
-  if (!initial) { std::cerr << initial.message << '\n'; return 1; }
+  auto initial = driver.load_positions(argv[2]);
+  if (!initial) { std::cerr << initial.result.message << '\n'; return 1; }
+  auto moved = driver.move_rods(initial.value.targets);
+  if (!moved) { std::cerr << moved.message << '\n'; return 1; }
   auto recorded = driver.record_positions(argv[3], "SDK example");
   if (!recorded) { std::cerr << recorded.message << '\n'; return 1; }
   auto loaded = driver.load_positions(argv[3]);
-  if (!loaded) { std::cerr << loaded.message << '\n'; return 1; }
-  auto plan = driver.plan_positions();
-  if (!plan) { std::cerr << plan.result.message << '\n'; return 1; }
-  auto executed = driver.execute_positions();
+  if (!loaded) { std::cerr << loaded.result.message << '\n'; return 1; }
+  auto executed = driver.move_rods(loaded.value.targets);
   if (!executed) { std::cerr << executed.message << '\n'; return 1; }
   if (!driver.m_current_positions.empty()) {
     const auto& rod=driver.m_current_positions.front();
-    auto moved=driver.move_rod(rod.address,rod.encoder,10.0);
+    auto moved=driver.move_rod(rod.address,rod.encoder);
     if (!moved) { std::cerr << moved.message << '\n'; return 1; }
   }
   std::vector<FF::Sample> samples{{0.0,100},{1.0,30},{2.0,100}};

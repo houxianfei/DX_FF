@@ -1,10 +1,17 @@
 {
-  "schema":"FF-TRAIN-1", "source":"Loaded", "machine_id":"SDK-SIM",
-  "config_version":"1", "channel":0, "training_rod":0,
-  "start_mm":0, "end_mm":1, "step_mm":0.1, "complete":true,
-  "execution_targets":[
-    {"channel":0,"rod":0,"position":50,"velocity":10},
-    {"channel":1,"rod":0,"position":50,"velocity":10},
-    {"channel":2,"rod":0,"position":50,"velocity":10}
+  "schema": "FF-POS-1",
+  "machine_id": "SDK-SIM",
+  "config_version": "1",
+  "summary": "Initial position",
+  "channels": [
+    {"channel": 0, "execution_targets": [
+      {"rod": 0, "position": 50}
+    ]},
+    {"channel": 1, "execution_targets": [
+      {"rod": 0, "position": 50}
+    ]},
+    {"channel": 2, "execution_targets": [
+      {"rod": 0, "position": 50}
+    ]}
   ]
 }

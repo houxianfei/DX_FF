@@ -136,14 +136,29 @@ std::string escapeJson(const std::string &value) {
 }
 std::string stringField(const std::string &text, const char *key) {
   std::smatch match;
-  const std::regex pattern("\"" + std::string(key) + "\"\\s*:\\s*\"([^\"]*)\"");
-  return std::regex_search(text, match, pattern) ? match[1].str() : std::string{};
+  const std::regex pattern("\"" + std::string(key) +
+                           "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+  if (!std::regex_search(text, match, pattern)) return {};
+  std::string value;
+  const auto encoded=match[1].str();
+  for (size_t i=0;i<encoded.size();++i) {
+    if (encoded[i]=='\\' && i+1<encoded.size()) ++i;
+    value.push_back(encoded[i]);
+  }
+  return value;
 }
 double numberField(const std::string &text, const char *key, double fallback = 0) {
   std::smatch match;
   const std::regex pattern("\"" + std::string(key) + "\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)");
   try { return std::regex_search(text, match, pattern) ? std::stod(match[1].str()) : fallback; }
   catch (...) { return fallback; }
+}
+bool unsignedField(const std::string& text,const char* key,std::uint64_t& value) {
+  std::smatch match;
+  const std::regex pattern("\""+std::string(key)+"\"\\s*:\\s*([0-9]+)(?=\\s*[,}])");
+  if (!std::regex_search(text,match,pattern)) return false;
+  try { value=std::stoull(match[1].str()); return true; }
+  catch (...) { return false; }
 }
 bool trainingBoolField(const std::string &text, const char *key) {
   std::smatch match;
@@ -156,7 +171,15 @@ std::string arrayBody(const std::string &text, const char *key) {
   const auto begin = text.find('[', pos);
   if (begin == std::string::npos) return {};
   int depth = 0;
+  bool quoted=false, escaped=false;
   for (size_t i = begin; i < text.size(); ++i) {
+    if (quoted) {
+      if (escaped) escaped=false;
+      else if (text[i]=='\\') escaped=true;
+      else if (text[i]=='"') quoted=false;
+      continue;
+    }
+    if (text[i]=='"') { quoted=true; continue; }
     if (text[i] == '[') ++depth;
     else if (text[i] == ']' && --depth == 0) return text.substr(begin + 1, i - begin - 1);
   }
@@ -164,11 +187,91 @@ std::string arrayBody(const std::string &text, const char *key) {
 }
 std::vector<std::string> objects(const std::string &array) {
   std::vector<std::string> result; int depth = 0; size_t start = 0;
+  bool quoted=false, escaped=false;
   for (size_t i = 0; i < array.size(); ++i) {
+    if (quoted) {
+      if (escaped) escaped=false;
+      else if (array[i]=='\\') escaped=true;
+      else if (array[i]=='"') quoted=false;
+      continue;
+    }
+    if (array[i]=='"') { quoted=true; continue; }
     if (array[i] == '{') { if (depth++ == 0) start = i; }
     else if (array[i] == '}' && --depth == 0) result.push_back(array.substr(start, i - start + 1));
   }
   return result;
+}
+std::string decimal(double value) {
+  const double rounded=std::round(value*1000.0)/1000.0;
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(3) << rounded;
+  auto text=out.str();
+  while (text.find('.')!=std::string::npos && text.back()=='0') text.pop_back();
+  if (text.back()=='.') text.pop_back();
+  return text=="-0" ? "0" : text;
+}
+bool validNumbers(const TrainingSession& s) {
+  if (!std::isfinite(s.startMm) || !std::isfinite(s.endMm) ||
+      !std::isfinite(s.stepMm) || s.stepMm<=0 ||
+      std::round(s.stepMm*1000.0)<=0 ||
+      !std::isfinite(s.valleySettings.minimumProminenceFraction) ||
+      !std::isfinite(s.valleySettings.minimumDistanceMm)) return false;
+  for (const auto& sample:s.samples) if (!std::isfinite(sample.positionMm)) return false;
+  for (double candidate:s.candidatesMm) if (!std::isfinite(candidate)) return false;
+  for (const auto& aim:s.aims)
+    if (!std::isfinite(aim.requestedMm) || !std::isfinite(aim.quantizedMm)) return false;
+  return true;
+}
+void writeSessionFields(std::ostream& out,const TrainingSession& s,const std::string& pad) {
+  out << pad << "\"source\": \"" << trainingSourceName(s.source) << "\",\n"
+      << pad << "\"training_rod\": " << int(s.trainingRod) << ",\n"
+      << pad << "\"occlusion_summary\": \"" << escapeJson(s.occlusionSummary) << "\",\n"
+      << pad << "\"start_mm\": " << decimal(s.startMm)
+      << ", \"end_mm\": " << decimal(s.endMm)
+      << ", \"step_mm\": " << decimal(s.stepMm) << ",\n"
+      << pad << "\"complete\": " << (s.complete?"true":"false") << ",\n"
+      << pad << "\"valley\": {\"smoothing\": " << s.valleySettings.smoothingPoints
+      << ", \"prominence\": " << decimal(s.valleySettings.minimumProminenceFraction)
+      << ", \"distance_mm\": " << decimal(s.valleySettings.minimumDistanceMm)
+      << ", \"maximum\": " << s.valleySettings.maximumCount << "},\n";
+  out << pad << "\"samples\": [";
+  for (size_t i=0;i<s.samples.size();++i)
+    out << (i?",":"") << '\n' << pad << "  {\"position_mm\": "
+        << decimal(s.samples[i].positionMm) << ", \"energy\": " << s.samples[i].energy << "}";
+  if (!s.samples.empty()) out << '\n' << pad;
+  out << "],\n" << pad << "\"candidates_mm\": [";
+  for (size_t i=0;i<s.candidatesMm.size();++i)
+    out << (i?",":"") << '\n' << pad << "  " << decimal(s.candidatesMm[i]);
+  if (!s.candidatesMm.empty()) out << '\n' << pad;
+  out << "],\n" << pad << "\"aims\": [";
+  for (size_t i=0;i<s.aims.size();++i) {
+    const auto& a=s.aims[i];
+    out << (i?",":"") << '\n' << pad << "  {\"rod\": " << int(a.address.rod)
+        << ", \"requested_mm\": " << decimal(a.requestedMm)
+        << ", \"quantized_mm\": " << decimal(a.quantizedMm)
+        << ", \"encoder_aim\": " << a.encoderAim
+        << ", \"actual_encoder\": " << a.actualEncoder
+        << ", \"assigned\": " << (a.assigned?"true":"false") << "}";
+  }
+  if (!s.aims.empty()) out << '\n' << pad;
+  out << "],\n" << pad << "\"rod_states\": [";
+  for (size_t i=0;i<s.rodStates.size();++i) {
+    const auto& r=s.rodStates[i];
+    out << (i?",":"") << '\n' << pad << "  {\"channel\": " << int(r.address.channel)
+        << ", \"rod\": " << int(r.address.rod)
+        << ", \"actual_encoder\": " << r.actualEncoder
+        << ", \"target_encoder\": " << r.targetEncoder << "}";
+  }
+  if (!s.rodStates.empty()) out << '\n' << pad;
+  out << "],\n" << pad << "\"execution_targets\": [";
+  for (size_t i=0;i<s.executionTargets.size();++i) {
+    const auto& t=s.executionTargets[i];
+    out << (i?",":"") << '\n' << pad << "  {\"channel\": " << int(t.address.channel)
+        << ", \"rod\": " << int(t.address.rod)
+        << ", \"position\": " << t.position << "}";
+  }
+  if (!s.executionTargets.empty()) out << '\n' << pad;
+  out << ']';
 }
 } // namespace
 
@@ -509,48 +612,29 @@ TrainingDragInterval TrainingAnalysis::dragInterval(
 }
 
 Result<void> TrainingAnalysis::saveSession(const std::string &path, const TrainingSession &session) {
-  std::ofstream out(path, std::ios::trunc); if (!out) return Result<void>::failure(ErrorCode::BackendFailure, "Could not write training session");
-  out << std::setprecision(17) << "{\n  \"schema\": \"" << TrainingSession::Schema << "\",\n"
-      << "  \"source\": \"" << trainingSourceName(session.source) << "\",\n"
+  if (!validNumbers(session))
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                 "Training decimals are invalid at 0.001 precision");
+  std::ofstream out(path,std::ios::trunc);
+  if (!out) return Result<void>::failure(ErrorCode::BackendFailure,"Could not write training session");
+  out << "{\n  \"schema\": \"" << TrainingSession::Schema << "\",\n"
       << "  \"machine_id\": \"" << escapeJson(session.machineId) << "\",\n"
       << "  \"config_version\": \"" << escapeJson(session.configVersion) << "\",\n"
       << "  \"created_unix_seconds\": " << session.createdUnixSeconds << ",\n"
-      << "  \"channel\": " << int(session.channel) << ", \"training_rod\": " << int(session.trainingRod) << ",\n"
-      << "  \"occlusion_summary\": \"" << escapeJson(session.occlusionSummary) << "\",\n"
-      << "  \"start_mm\": " << session.startMm << ", \"end_mm\": " << session.endMm << ", \"step_mm\": " << session.stepMm << ",\n"
-      << "  \"complete\": " << (session.complete ? "true" : "false") << ",\n"
-      << "  \"valley\": {\"smoothing\": " << session.valleySettings.smoothingPoints << ", \"prominence\": " << session.valleySettings.minimumProminenceFraction << ", \"distance_mm\": " << session.valleySettings.minimumDistanceMm << ", \"maximum\": " << session.valleySettings.maximumCount << "},\n"
-      << "  \"samples\": [";
-  for (size_t i=0;i<session.samples.size();++i) out << (i ? "," : "") << "{\"position_mm\":" << session.samples[i].positionMm << ",\"energy\":" << session.samples[i].energy << "}";
-  out << "],\n  \"candidates_mm\": ["; for (size_t i=0;i<session.candidatesMm.size();++i) out << (i ? "," : "") << session.candidatesMm[i];
-  out << "],\n  \"aims\": ["; for (size_t i=0;i<session.aims.size();++i) { const auto &a=session.aims[i]; out << (i ? "," : "") << "{\"rod\":" << int(a.address.rod) << ",\"requested_mm\":" << a.requestedMm << ",\"quantized_mm\":" << a.quantizedMm << ",\"encoder_aim\":" << a.encoderAim << ",\"actual_encoder\":" << a.actualEncoder << ",\"assigned\":" << (a.assigned ? "true" : "false") << "}"; }
-  out << "],\n  \"rod_states\": [";
-  for (size_t i = 0; i < session.rodStates.size(); ++i) {
-    const auto &state = session.rodStates[i];
-    out << (i ? "," : "") << "{\"channel\":"
-        << int(state.address.channel) << ",\"rod\":"
-        << int(state.address.rod) << ",\"actual_encoder\":"
-        << state.actualEncoder << ",\"target_encoder\":"
-        << state.targetEncoder << "}";
-  }
-  out << "],\n  \"execution_targets\": [";
-  for (size_t i = 0; i < session.executionTargets.size(); ++i) {
-    const auto &target = session.executionTargets[i];
-    out << (i ? "," : "") << "{\"channel\":"
-        << int(target.address.channel) << ",\"rod\":"
-        << int(target.address.rod) << ",\"position\":" << target.position
-        << ",\"velocity\":" << target.velocity << "}";
-  }
-  out << "]\n}\n"; return out ? Result<void>::success() : Result<void>::failure(ErrorCode::BackendFailure, "Could not finish training session");
+      << "  \"channel\": " << int(session.channel) << ",\n";
+  writeSessionFields(out,session,"  ");
+  out << "\n}\n";
+  out.flush();
+  return out ? Result<void>::success() :
+               Result<void>::failure(ErrorCode::BackendFailure,"Could not finish training session");
 }
 
-Result<TrainingSession> TrainingAnalysis::loadSession(const std::string &path) {
-  std::ifstream in(path); std::string text((std::istreambuf_iterator<char>(in)), {}); if (!in) return Result<TrainingSession>::failure(ErrorCode::BackendFailure, "Could not read training session");
+static Result<TrainingSession> parseSessionText(const std::string& text) {
   if (stringField(text, "schema") != TrainingSession::Schema) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration, "Unsupported training-session schema");
   TrainingSession s; const auto source=stringField(text,"source"); s.source=source=="Sim2"?TrainingSource::Sim2:source=="Real"?TrainingSource::Real:source=="Loaded"?TrainingSource::Loaded:TrainingSource::Sim1;
   s.machineId=stringField(text,"machine_id"); s.configVersion=stringField(text,"config_version"); s.occlusionSummary=stringField(text,"occlusion_summary"); s.createdUnixSeconds=static_cast<std::int64_t>(numberField(text,"created_unix_seconds")); s.channel=static_cast<ChannelId>(int(numberField(text,"channel"))); s.trainingRod=static_cast<RodId>(int(numberField(text,"training_rod"))); s.startMm=numberField(text,"start_mm"); s.endMm=numberField(text,"end_mm"); s.stepMm=numberField(text,"step_mm"); s.complete=trainingBoolField(text,"complete");
   const auto valleyPos=text.find("\"valley\""); const auto valley=valleyPos==std::string::npos?std::string{}:text.substr(valleyPos, text.find('}', valleyPos)-valleyPos+1); s.valleySettings.smoothingPoints=int(numberField(valley,"smoothing",5)); s.valleySettings.minimumProminenceFraction=numberField(valley,"prominence",.1); s.valleySettings.minimumDistanceMm=numberField(valley,"distance_mm",.5); s.valleySettings.maximumCount=int(numberField(valley,"maximum"));
-  for (const auto &item:objects(arrayBody(text,"samples"))) { const double p=numberField(item,"position_mm",std::numeric_limits<double>::quiet_NaN()); const double e=numberField(item,"energy",-1); if(!std::isfinite(p)||e<0) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid training sample"); s.samples.push_back({p,static_cast<std::uint64_t>(e)}); }
+  for (const auto &item:objects(arrayBody(text,"samples"))) { const double p=numberField(item,"position_mm",std::numeric_limits<double>::quiet_NaN()); std::uint64_t energy{}; if(!std::isfinite(p)||!unsignedField(item,"energy",energy)) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid training sample"); s.samples.push_back({p,energy}); }
   const std::regex number("-?[0-9]+(?:\\.[0-9]+)?"); const auto candidateBody=arrayBody(text,"candidates_mm"); for(std::sregex_iterator it(candidateBody.begin(),candidateBody.end(),number),end;it!=end;++it){ const double value=std::stod(it->str()); if(!std::isfinite(value)) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid candidate"); s.candidatesMm.push_back(value); }
   std::set<int> seen; for(const auto &item:objects(arrayBody(text,"aims"))) { const int rod=int(numberField(item,"rod",-1)); if(rod<0||rod>255||!seen.insert(rod).second) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid or duplicate aim Rod"); s.aims.push_back({{s.channel,static_cast<RodId>(rod)},numberField(item,"requested_mm"),numberField(item,"quantized_mm"),int(numberField(item,"encoder_aim")),int(numberField(item,"actual_encoder")),trainingBoolField(item,"assigned")}); }
   std::set<std::pair<int, int>> stateAddresses;
@@ -581,21 +665,122 @@ Result<TrainingSession> TrainingAnalysis::loadSession(const std::string &path) {
     const int rod = int(numberField(item, "rod", -1));
     const double position = numberField(item, "position",
                                         std::numeric_limits<double>::quiet_NaN());
-    const double velocity = numberField(item, "velocity",
-                                        std::numeric_limits<double>::quiet_NaN());
     if (channel < 0 || channel > 2 || rod < 0 || rod > 255 ||
         !std::isfinite(position) || position < std::numeric_limits<std::int32_t>::min() ||
         position > std::numeric_limits<std::int32_t>::max() ||
-        !std::isfinite(velocity) || velocity < 0.0 ||
         !targetAddresses.insert({channel, rod}).second)
       return Result<TrainingSession>::failure(
           ErrorCode::InvalidConfiguration,
           "Invalid or duplicate executable Rod target");
     s.executionTargets.push_back(
         {{static_cast<ChannelId>(channel), static_cast<RodId>(rod)},
-         static_cast<std::int32_t>(position), velocity});
+         static_cast<std::int32_t>(position)});
   }
   if (s.stepMm <= 0 || !std::isfinite(s.startMm) || !std::isfinite(s.endMm)) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid scan settings");
   return Result<TrainingSession>::success(std::move(s));
+}
+Result<TrainingSession> TrainingAnalysis::loadSession(const std::string &path) {
+  std::ifstream in(path);
+  if (!in) return Result<TrainingSession>::failure(ErrorCode::BackendFailure,
+                                                   "Could not read training session");
+  const std::string text((std::istreambuf_iterator<char>(in)), {});
+  return parseSessionText(text);
+}
+Result<void> TrainingAnalysis::saveArchive(const std::string& path,
+                                            const TrainingArchive& archive) {
+  if (archive.selectedChannel<0 || archive.selectedChannel>2 ||
+      archive.machineId.empty() || archive.configVersion.empty())
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                 "Invalid training archive header");
+  for (int ch=0;ch<3;++ch)
+    if (archive.channels[ch] &&
+        (int(archive.channels[ch]->channel)!=ch || !validNumbers(*archive.channels[ch])))
+      return Result<void>::failure(ErrorCode::InvalidConfiguration,
+                                   "Invalid channel data at 0.001 precision");
+  std::ofstream out(path,std::ios::trunc);
+  if (!out) return Result<void>::failure(ErrorCode::BackendFailure,
+                                         "Could not write training archive");
+  out << "{\n  \"schema\": \"FF-TRAIN-2\",\n"
+      << "  \"machine_id\": \"" << escapeJson(archive.machineId) << "\",\n"
+      << "  \"config_version\": \"" << escapeJson(archive.configVersion) << "\",\n"
+      << "  \"created_unix_seconds\": " << archive.createdUnixSeconds << ",\n"
+      << "  \"selected_channel\": " << archive.selectedChannel << ",\n"
+      << "  \"channels\": [\n";
+  for (int ch=0;ch<3;++ch) {
+    out << "    {\"channel\": " << ch << ", \"training\": ";
+    if (archive.channels[ch]) {
+      out << "{\n";
+      writeSessionFields(out,*archive.channels[ch],"      ");
+      out << "\n    }";
+    } else out << "{}";
+    out << "}" << (ch<2?",":"") << '\n';
+  }
+  out << "  ]\n}\n";
+  out.flush();
+  return out ? Result<void>::success() :
+               Result<void>::failure(ErrorCode::BackendFailure,
+                                     "Could not finish training archive");
+}
+Result<TrainingArchive> TrainingAnalysis::loadArchive(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) return Result<TrainingArchive>::failure(ErrorCode::BackendFailure,
+                                                   "Could not read training archive");
+  const std::string text((std::istreambuf_iterator<char>(in)),{});
+  const auto schema=stringField(text,"schema");
+  TrainingArchive archive;
+  if (schema==TrainingSession::Schema) {
+    auto single=parseSessionText(text);
+    if (!single) return Result<TrainingArchive>::failure(single.error,single.message);
+    const int ch=int(single.value.channel);
+    if (ch<0 || ch>2)
+      return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                              "Invalid legacy training channel");
+    archive.machineId=single.value.machineId;
+    archive.configVersion=single.value.configVersion;
+    archive.createdUnixSeconds=single.value.createdUnixSeconds;
+    archive.selectedChannel=ch;
+    archive.channels[ch]=std::move(single.value);
+    return Result<TrainingArchive>::success(std::move(archive));
+  }
+  if (schema!="FF-TRAIN-2")
+    return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                            "Unsupported training archive schema");
+  archive.machineId=stringField(text,"machine_id");
+  archive.configVersion=stringField(text,"config_version");
+  archive.createdUnixSeconds=static_cast<std::int64_t>(numberField(text,"created_unix_seconds"));
+  archive.selectedChannel=int(numberField(text,"selected_channel",-1));
+  if (archive.machineId.empty() || archive.configVersion.empty() ||
+      archive.selectedChannel<0 || archive.selectedChannel>2)
+    return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                            "Invalid training archive header");
+  const auto channelObjects=objects(arrayBody(text,"channels"));
+  if (channelObjects.size()!=3)
+    return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                            "Training archive must list three channels");
+  std::set<int> seen;
+  const std::regex emptyTraining("\"training\"\\s*:\\s*\\{\\s*\\}");
+  for (const auto& entry:channelObjects) {
+    const int ch=int(numberField(entry,"channel",-1));
+    if (ch<0 || ch>2 || !seen.insert(ch).second ||
+        entry.find("\"training\"")==std::string::npos)
+      return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                              "Invalid training channel entry");
+    if (std::regex_search(entry,emptyTraining)) continue;
+    if (stringField(entry,"source").empty())
+      return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                              "Incomplete training channel entry");
+    std::ostringstream wrapped;
+    wrapped << "{\"schema\":\"FF-TRAIN-1\",\"machine_id\":\""
+            << escapeJson(archive.machineId) << "\",\"config_version\":\""
+            << escapeJson(archive.configVersion) << "\",\"created_unix_seconds\":"
+            << archive.createdUnixSeconds << ',' << entry.substr(1);
+    auto parsed=parseSessionText(wrapped.str());
+    if (!parsed) return Result<TrainingArchive>::failure(parsed.error,parsed.message);
+    if (int(parsed.value.channel)!=ch)
+      return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
+                                              "Training channel identity mismatch");
+    archive.channels[ch]=std::move(parsed.value);
+  }
+  return Result<TrainingArchive>::success(std::move(archive));
 }
 } // namespace ff

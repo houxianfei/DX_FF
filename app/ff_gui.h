@@ -36,7 +36,6 @@ private:
   bool showTraining_{false};
   bool parametersInitialized_{false};
   bool parametersDirty_{false};
-  int parameterChannel_{0};
   int selectedRod_{0};
   int selectedLayerMember_{0};
   int selectedClearanceRule_{0};
@@ -71,16 +70,32 @@ private:
   bool hasPresetSlot(int slot) const;
   std::string presetPath(int slot) const;
   bool savePreset(int slot, const std::vector<ff::RodTarget> &targets);
-  std::vector<ff::RodTarget> loadPreset(int slot) const;
+  std::vector<ff::RodTarget> loadPreset(int slot);
   void welcome();
   void dashboard();
   void drawChannel(int index, const ff::FFStatus &status);
   void parameters();
+  void drawParameterSystem();
+  void drawParameterController(ff::FFChannelConfig&);
+  void drawParameterTraining(ff::FFChannelConfig&);
+  void drawParameterRods(ff::FFChannelConfig&, const std::string&);
+  void drawParameterLayers(ff::FFChannelConfig&);
+  void drawParameterClearance(ff::FFChannelConfig&);
   void training();
+  void drawTrainingSettings(const ff::FFConfig&, int, const ff::FFStatus&,
+                            std::optional<ff::RodId>, bool&);
+  void drawTrainingScanActions(const ff::FFConfig&, int, std::optional<ff::RodId>);
+  void initializeTraining();
+  void startTrainingScan(const ff::FFConfig&, const std::vector<ff::RodConfig>&);
+  void drawTrainingCandidates(const ff::FFConfig&, int, std::optional<ff::RodId>,
+                              int, bool, bool&);
+  void drawTrainingResults(const ff::FFConfig&, int, const ff::FFStatus&);
+  void saveTrainingSession(const ff::FFConfig&);
+  void drawTrainingFiles(const ff::FFConfig&);
   void tickTrainingScan();
   void resetTrainingMeasurement();
   bool updateTrainingAssignment();
-  bool candidateSetIsLegal(const std::vector<double> &, std::string *reason = nullptr) const;
+  bool candidateSetIsLegal(const std::vector<double> &, std::string *reason = nullptr);
   void refreshTrainingForbiddenBands();
   void initializeParameters();
   bool saveParameterFile(const std::string &path);

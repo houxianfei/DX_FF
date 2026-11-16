@@ -1,5 +1,4 @@
 #include "ff_gui.h"
-#include <set>
 #include "ui_helpers.h"
 #include <algorithm>
 #include <cmath>
@@ -11,11 +10,6 @@
 #include <sstream>
 namespace fs = std::filesystem;
 namespace ff_gui {
-void MainUi::drawChannel(int index, const ff::FFStatus &s) {
-  auto &c = s.channels[index];
-  ImGui::Text("CH%d: %zu configured device(s)", index + 1, c.rods.size());
-}
-
 void MainUi::initializeParameters() {
   if (parametersInitialized_)
     return;
@@ -102,32 +96,100 @@ void MainUi::parameters() {
   if (!parameterNotice_.empty()) ImGui::TextWrapped("%s", parameterNotice_.c_str());
   ImGui::Separator();
 
+  drawParameterSystem();
+  if (ImGui::BeginTabBar("ParameterChannels")) {
+    for (int channelIndex = 0; channelIndex < 3; ++channelIndex) {
+      const std::string label = "CH" + std::to_string(channelIndex + 1);
+      if (!ImGui::BeginTabItem(label.c_str())) continue;
+      auto& channel = parameterDraft_.channels[channelIndex];
+      drawParameterController(channel);
+      drawParameterTraining(channel);
+      if (ImGui::BeginTabBar("ConfigSections")) {
+        drawParameterRods(channel, label);
+        drawParameterLayers(channel);
+        drawParameterClearance(channel);
+        ImGui::EndTabBar();
+      }
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
+  if (ImGuiFileDialog::Instance()->Display("FFConfigLoad")) { if (ImGuiFileDialog::Instance()->IsOk()) loadParameterFile(ImGuiFileDialog::Instance()->GetFilePathName()); ImGuiFileDialog::Instance()->Close(); }
+  if (ImGuiFileDialog::Instance()->Display("FFConfigSave")) { if (ImGuiFileDialog::Instance()->IsOk()) saveParameterFile(ImGuiFileDialog::Instance()->GetFilePathName()); ImGuiFileDialog::Instance()->Close(); }
+  if (ImGui::BeginPopupModal("Discard unsaved configuration?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) { ImGui::Text("Save changes before continuing?"); if (ImGui::Button("Save")) { if (saveParameterFile(configPath_) && pendingLoadPath_ == "__open_dialog__") ImGuiFileDialog::Instance()->OpenDialog("FFConfigLoad", "Load FF Configuration", ".json", {}); pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::SameLine(); if (ImGui::Button("Discard")) { parameterDraft_ = parameterOriginal_; parametersDirty_ = false; if (pendingLoadPath_ == "__open_dialog__") ImGuiFileDialog::Instance()->OpenDialog("FFConfigLoad", "Load FF Configuration", ".json", {}); else showParameters_ = false; pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::SameLine(); if (ImGui::Button("Cancel")) { pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::EndPopup(); }
+  ImGui::End();
+}
+void MainUi::drawParameterSystem() {
   if (ImGui::CollapsingHeader("System", ImGuiTreeNodeFlags_DefaultOpen)) {
-    if (inputString("Machine ID", parameterDraft_.machineId) || inputString("Config Version", parameterDraft_.configVersion)) markParametersDirty();
+    bool changed = inputString("Machine ID", parameterDraft_.machineId);
+    changed |= inputString("Config Version", parameterDraft_.configVersion);
+    if (changed) markParametersDirty();
     int maxRods = static_cast<int>(parameterDraft_.maxActiveRodCount);
     int expiration = static_cast<int>(parameterDraft_.statusExpiration.count());
-    if (ImGui::InputInt("Max Active Rod Count", &maxRods) || ImGui::InputInt("Status Expiration (ms)", &expiration)) {
+    changed = ImGui::InputInt("Max Active Rod Count", &maxRods);
+    changed |= ImGui::InputInt("Status Expiration (ms)", &expiration);
+    if (changed) {
       parameterDraft_.maxActiveRodCount = std::max(0, maxRods);
       parameterDraft_.statusExpiration = std::chrono::milliseconds(std::max(0, expiration)); markParametersDirty();
     }
+    ff::RodConfig *shared = nullptr;
+    for (auto &channel : parameterDraft_.channels)
+      if (!channel.rods.empty()) { shared = &channel.rods.front(); break; }
+    if (shared) {
+      ImGui::SeparatorText("All Rod Motor Parameters");
+      int velocity = static_cast<int>(shared->maxVelocity);
+      int acceleration = static_cast<int>(shared->maxAcceleration);
+      int deceleration = static_cast<int>(shared->maxDeceleration);
+      int tolerance = shared->positionTolerance;
+      int stable = static_cast<int>(shared->stableTime.count());
+      int timeout = static_cast<int>(shared->moveTimeout.count());
+      bool motionChanged = ImGui::InputInt("Speed Limit (raw 1-1023)", &velocity);
+      motionChanged |= ImGui::InputInt("Acceleration (raw 0-255)", &acceleration);
+      motionChanged |= ImGui::InputInt("Deceleration (raw 0-255)", &deceleration);
+      ImGui::SeparatorText("All Rod Completion Settings");
+      motionChanged |= ImGui::InputInt("Position Tolerance (count)", &tolerance);
+      motionChanged |= ImGui::InputInt("Stable Time (ms)", &stable);
+      motionChanged |= ImGui::InputInt("Move Timeout (ms)", &timeout);
+      if (motionChanged) {
+        for (auto &channel : parameterDraft_.channels)
+          for (auto &rod : channel.rods) {
+            rod.maxVelocity = velocity;
+            rod.maxAcceleration = acceleration;
+            rod.maxDeceleration = deceleration;
+            rod.positionTolerance = tolerance;
+            rod.stableTime = std::chrono::milliseconds(std::max(0, stable));
+            rod.moveTimeout = std::chrono::milliseconds(std::max(0, timeout));
+          }
+        markParametersDirty();
+      }
+      ImGui::TextDisabled("Motor values are checked and written at connection when different.");
+    }
   }
-  if (!ImGui::BeginTabBar("ParameterChannels")) { ImGui::End(); return; }
-  for (int channelIndex = 0; channelIndex < 3; ++channelIndex) {
-    const std::string label = "CH" + std::to_string(channelIndex + 1);
-    if (!ImGui::BeginTabItem(label.c_str())) continue;
-    parameterChannel_ = channelIndex;
-    auto &channel = parameterDraft_.channels[channelIndex];
+
+}
+
+void MainUi::drawParameterController(ff::FFChannelConfig& channel) {
     if (ImGui::CollapsingHeader("Controller", ImGuiTreeNodeFlags_DefaultOpen)) {
       auto &controller = channel.controller;
-      if (inputString("Controller Name", controller.name) || inputString("Config Serial Port", controller.serial.portName)) markParametersDirty();
+      bool changed = inputString("Controller Name", controller.name);
+      changed |= inputString("Config Serial Port", controller.serial.portName);
+      if (changed) markParametersDirty();
       int baud = static_cast<int>(controller.serial.baudRate), timeout = static_cast<int>(controller.serial.timeout.count());
       int poll = static_cast<int>(controller.pollPeriod.count()), retry = static_cast<int>(controller.retryCount);
-      if (ImGui::InputInt("Baud Rate", &baud) || ImGui::InputInt("Timeout (ms)", &timeout) || ImGui::InputInt("Poll Period (ms)", &poll) || ImGui::InputInt("Retry Count", &retry)) {
+      bool valuesChanged = ImGui::InputInt("Baud Rate", &baud);
+      valuesChanged |= ImGui::InputInt("Timeout (ms)", &timeout);
+      valuesChanged |= ImGui::InputInt("Poll Period (ms)", &poll);
+      valuesChanged |= ImGui::InputInt("Retry Count", &retry);
+      if (valuesChanged) {
         controller.serial.baudRate = std::max(0, baud); controller.serial.timeout = std::chrono::milliseconds(std::max(0, timeout));
         controller.pollPeriod = std::chrono::milliseconds(std::max(0, poll)); controller.retryCount = std::max(0, retry); markParametersDirty();
       }
       ImGui::TextDisabled("Connection settings on the Welcome page override this port at runtime.");
     }
+
+}
+
+void MainUi::drawParameterTraining(ff::FFChannelConfig& channel) {
     if (ImGui::CollapsingHeader("Training", ImGuiTreeNodeFlags_DefaultOpen)) {
       std::set<int> layer2Rods;
       for (const auto &member : channel.layerMembers) {
@@ -158,95 +220,113 @@ void MainUi::parameters() {
       if (layer2Rods.empty())
         ImGui::TextDisabled("Add a valid Layer 2 membership before selecting a Training Rod.");
     }
-    if (!ImGui::BeginTabBar("ConfigSections")) { ImGui::EndTabItem(); continue; }
-    if (ImGui::BeginTabItem("Rods")) {
-    if (ImGui::BeginTable("Rods", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 190))) {
-      ImGui::TableSetupScrollFreeze(2, 1);
-      ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 45); ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Soft Min"); ImGui::TableSetupColumn("Soft Max"); ImGui::TableSetupColumn("Safe"); ImGui::TableSetupColumn("P0"); ImGui::TableSetupColumn("P1"); ImGui::TableSetupColumn("Max Vel."); ImGui::TableHeadersRow();
-      for (size_t i = 0; i < channel.rods.size(); ++i) {
-        const auto &rod = channel.rods[i]; ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
-        if (ImGui::Selectable(std::to_string(int(rod.id)).c_str(), selectedRod_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedRod_ = int(i);
-        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(rod.name.c_str()); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", rod.softMin); ImGui::TableSetColumnIndex(3); ImGui::Text("%d", rod.softMax);
-        ImGui::TableSetColumnIndex(4); ImGui::Text("%d", rod.safePosition); ImGui::TableSetColumnIndex(5); ImGui::Text("%.5f", rod.p0); ImGui::TableSetColumnIndex(6); ImGui::Text("%.7f", rod.p1); ImGui::TableSetColumnIndex(7); ImGui::Text("%.2f", rod.maxVelocity);
-      }
-      ImGui::EndTable();
-    }
-    if (ImGui::Button("Add Rod")) {
-      int id = 0; while (id < 256 && std::any_of(channel.rods.begin(), channel.rods.end(), [id](const ff::RodConfig &r){ return int(r.id) == id; })) ++id;
-      if (id < 256) { ff::RodConfig rod; rod.id = static_cast<ff::RodId>(id); rod.name = label + "-R" + std::to_string(id); rod.hardMax = rod.softMax = 4095; rod.p1 = 1; rod.maxVelocity = 1; channel.rods.push_back(rod); selectedRod_ = int(channel.rods.size()) - 1; markParametersDirty(); }
-    }
-    tooltip("Add a Rod with the next available ID to this channel.");
-    ImGui::SameLine();
-    if (ImGui::Button("Remove Selected Rod") && selectedRod_ >= 0 && static_cast<size_t>(selectedRod_) < channel.rods.size()) {
-      const int id = int(channel.rods[selectedRod_].id);
-      const bool referenced = std::any_of(channel.layerMembers.begin(), channel.layerMembers.end(), [id](const ff::LayerMembership &m){ return int(m.rod) == id || m.leftNeighbor == id || m.rightNeighbor == id; }) || std::any_of(channel.clearanceRules.begin(), channel.clearanceRules.end(), [id](const ff::PairClearanceRule &r){ return int(r.first) == id || int(r.second) == id; });
-      if (referenced) parameterNotice_ = "Remove layer memberships and clearance rules that reference this Rod first.";
-      else { eraseAt(channel.rods, selectedRod_); selectedRod_ = std::max(0, selectedRod_ - 1); markParametersDirty(); }
-    }
-    tooltip("Remove the selected Rod. A Rod referenced by a layer or clearance rule must be unlinked first.");
-    if (selectedRod_ >= 0 && static_cast<size_t>(selectedRod_) < channel.rods.size()) {
-      auto &rod = channel.rods[selectedRod_]; ImGui::SeparatorText("Selected Rod"); ImGui::Text("Rod ID: %d", int(rod.id));
-      bool changed = inputString("Rod Name", rod.name); changed |= ImGui::InputInt("Hard Min", &rod.hardMin) || ImGui::InputInt("Hard Max", &rod.hardMax) || ImGui::InputInt("Soft Min", &rod.softMin) || ImGui::InputInt("Soft Max", &rod.softMax) || ImGui::InputInt("Zero Position", &rod.zeroPosition) || ImGui::InputInt("Safe Position", &rod.safePosition) || ImGui::Checkbox("Safe Position Valid", &rod.safePositionValid) || ImGui::InputDouble("P0", &rod.p0) || ImGui::InputDouble("P1", &rod.p1) || ImGui::InputInt("Inward Direction", &rod.inwardDirection) || ImGui::InputDouble("Max Velocity", &rod.maxVelocity) || ImGui::InputDouble("Max Acceleration", &rod.maxAcceleration) || ImGui::InputDouble("Max Deceleration", &rod.maxDeceleration) || ImGui::InputInt("Position Tolerance", &rod.positionTolerance);
-      int stable = int(rod.stableTime.count()), moveTimeout = int(rod.moveTimeout.count()); changed |= ImGui::InputInt("Stable Time (ms)", &stable) || ImGui::InputInt("Move Timeout (ms)", &moveTimeout); rod.stableTime = std::chrono::milliseconds(std::max(0, stable)); rod.moveTimeout = std::chrono::milliseconds(std::max(0, moveTimeout)); if (changed) markParametersDirty();
-    }
-    ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Layer Memberships")) {
-    ImGui::SeparatorText("Layer Memberships");
-    if (ImGui::BeginTable("LayerMembershipTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 130))) {
-      ImGui::TableSetupColumn("Rod"); ImGui::TableSetupColumn("Layer"); ImGui::TableSetupColumn("Role"); ImGui::TableSetupColumn("Left Neighbor"); ImGui::TableSetupColumn("Right Neighbor"); ImGui::TableHeadersRow();
-      for (size_t i = 0; i < channel.layerMembers.size(); ++i) {
-        const auto &m = channel.layerMembers[i]; ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
-        if (ImGui::Selectable(std::to_string(int(m.rod)).c_str(), selectedLayerMember_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedLayerMember_ = int(i);
-        ImGui::TableSetColumnIndex(1); ImGui::Text("%d", m.layer); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", m.role); ImGui::TableSetColumnIndex(3); ImGui::Text("%d", m.leftNeighbor); ImGui::TableSetColumnIndex(4); ImGui::Text("%d", m.rightNeighbor);
-        ImGui::PopID();
-      }
-      ImGui::EndTable();
-    }
-    if (ImGui::Button("Add Layer Member")) { channel.layerMembers.push_back({}); selectedLayerMember_ = int(channel.layerMembers.size()) - 1; markParametersDirty(); }
-    tooltip("Add a layer-membership record for this channel.");
-    ImGui::SameLine();
-    if (ImGui::Button("Remove Selected Member") && eraseAt(channel.layerMembers, selectedLayerMember_)) { selectedLayerMember_ = std::max(0, selectedLayerMember_ - 1); markParametersDirty(); }
-    tooltip("Remove the selected layer-membership record.");
-    if (selectedLayerMember_ >= 0 && static_cast<size_t>(selectedLayerMember_) < channel.layerMembers.size()) {
-      auto &m = channel.layerMembers[selectedLayerMember_]; ImGui::Text("Selected Layer Membership"); int rod = int(m.rod);
-      bool changed = ImGui::InputInt("Member Rod", &rod) || ImGui::InputInt("Member Layer", &m.layer) || ImGui::InputInt("Member Role", &m.role) || ImGui::InputInt("Member Left Neighbor", &m.leftNeighbor) || ImGui::InputInt("Member Right Neighbor", &m.rightNeighbor);
-      if (changed) { m.rod = static_cast<ff::RodId>(std::clamp(rod, 0, 255)); markParametersDirty(); }
-    }
-    ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Clearance Rules")) {
-    ImGui::SeparatorText("Clearance Rules");
-    if (ImGui::BeginTable("ClearanceRuleTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 120))) {
-      ImGui::TableSetupColumn("Layer"); ImGui::TableSetupColumn("Rod A"); ImGui::TableSetupColumn("Rod B"); ImGui::TableSetupColumn("Minimum Clearance (mm)"); ImGui::TableHeadersRow();
-      for (size_t i = 0; i < channel.clearanceRules.size(); ++i) {
-        const auto &r = channel.clearanceRules[i]; ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
-        if (ImGui::Selectable(std::to_string(r.layer).c_str(), selectedClearanceRule_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedClearanceRule_ = int(i);
-        ImGui::TableSetColumnIndex(1); ImGui::Text("%d", int(r.first)); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", int(r.second)); ImGui::TableSetColumnIndex(3); ImGui::Text("%.4f", r.minimumClearanceMm);
-        ImGui::PopID();
-      }
-      ImGui::EndTable();
-    }
-    if (ImGui::Button("Add Clearance Rule")) { channel.clearanceRules.push_back({}); selectedClearanceRule_ = int(channel.clearanceRules.size()) - 1; markParametersDirty(); }
-    tooltip("Add a minimum-clearance rule for a pair of Rods.");
-    ImGui::SameLine();
-    if (ImGui::Button("Remove Selected Rule") && eraseAt(channel.clearanceRules, selectedClearanceRule_)) { selectedClearanceRule_ = std::max(0, selectedClearanceRule_ - 1); markParametersDirty(); }
-    tooltip("Remove the selected clearance rule.");
-    if (selectedClearanceRule_ >= 0 && static_cast<size_t>(selectedClearanceRule_) < channel.clearanceRules.size()) {
-      auto &r = channel.clearanceRules[selectedClearanceRule_]; ImGui::Text("Selected Clearance Rule"); int first = int(r.first), second = int(r.second);
-      bool changed = ImGui::InputInt("Rule Layer", &r.layer) || ImGui::InputInt("Rule Rod A", &first) || ImGui::InputInt("Rule Rod B", &second) || ImGui::InputDouble("Rule Minimum Clearance (mm)", &r.minimumClearanceMm);
-      if (changed) { r.first = static_cast<ff::RodId>(std::clamp(first, 0, 255)); r.second = static_cast<ff::RodId>(std::clamp(second, 0, 255)); markParametersDirty(); }
-    }
-    ImGui::EndTabItem();
-    }
-    ImGui::EndTabBar();
-    ImGui::EndTabItem();
-  }
-  ImGui::EndTabBar();
-  if (ImGuiFileDialog::Instance()->Display("FFConfigLoad")) { if (ImGuiFileDialog::Instance()->IsOk()) loadParameterFile(ImGuiFileDialog::Instance()->GetFilePathName()); ImGuiFileDialog::Instance()->Close(); }
-  if (ImGuiFileDialog::Instance()->Display("FFConfigSave")) { if (ImGuiFileDialog::Instance()->IsOk()) saveParameterFile(ImGuiFileDialog::Instance()->GetFilePathName()); ImGuiFileDialog::Instance()->Close(); }
-  if (ImGui::BeginPopupModal("Discard unsaved configuration?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) { ImGui::Text("Save changes before continuing?"); if (ImGui::Button("Save")) { if (saveParameterFile(configPath_) && pendingLoadPath_ == "__open_dialog__") ImGuiFileDialog::Instance()->OpenDialog("FFConfigLoad", "Load FF Configuration", ".json", {}); pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::SameLine(); if (ImGui::Button("Discard")) { parameterDraft_ = parameterOriginal_; parametersDirty_ = false; if (pendingLoadPath_ == "__open_dialog__") ImGuiFileDialog::Instance()->OpenDialog("FFConfigLoad", "Load FF Configuration", ".json", {}); else showParameters_ = false; pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::SameLine(); if (ImGui::Button("Cancel")) { pendingLoadPath_.clear(); ImGui::CloseCurrentPopup(); } ImGui::EndPopup(); }
-  ImGui::End();
+
 }
+
+void MainUi::drawParameterRods(ff::FFChannelConfig& channel, const std::string& label) {
+  if (!ImGui::BeginTabItem("Rods")) return;
+  if (ImGui::BeginTable("Rods", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 190))) {
+    ImGui::TableSetupScrollFreeze(2, 1);
+    ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 45); ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Soft Min (count)"); ImGui::TableSetupColumn("Soft Max (count)"); ImGui::TableSetupColumn("Safe (count)"); ImGui::TableSetupColumn("P0 (mm)"); ImGui::TableSetupColumn("P1 (mm/count)"); ImGui::TableSetupColumn("Speed Raw"); ImGui::TableHeadersRow();
+    for (size_t i = 0; i < channel.rods.size(); ++i) {
+      const auto &rod = channel.rods[i]; ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
+      if (ImGui::Selectable(std::to_string(int(rod.id)).c_str(), selectedRod_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedRod_ = int(i);
+      ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(rod.name.c_str()); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", rod.softMin); ImGui::TableSetColumnIndex(3); ImGui::Text("%d", rod.softMax);
+      ImGui::TableSetColumnIndex(4); ImGui::Text("%d", rod.safePosition); ImGui::TableSetColumnIndex(5); ImGui::Text("%.5f", rod.p0); ImGui::TableSetColumnIndex(6); ImGui::Text("%.7f", rod.p1); ImGui::TableSetColumnIndex(7); ImGui::Text("%.2f", rod.maxVelocity);
+    }
+    ImGui::EndTable();
+  }
+  if (ImGui::Button("Add Rod")) {
+    int id = 0; while (id < 256 && std::any_of(channel.rods.begin(), channel.rods.end(), [id](const ff::RodConfig &r){ return int(r.id) == id; })) ++id;
+    if (id < 256) { ff::RodConfig rod; rod.id = static_cast<ff::RodId>(id); rod.name = label + "-R" + std::to_string(id); rod.hardMax = rod.softMax = 4095; rod.p1 = 1;
+      for (const auto &other : parameterDraft_.channels) if (!other.rods.empty()) { const auto &shared = other.rods.front(); rod.maxVelocity = shared.maxVelocity; rod.maxAcceleration = shared.maxAcceleration; rod.maxDeceleration = shared.maxDeceleration; rod.positionTolerance = shared.positionTolerance; rod.stableTime = shared.stableTime; rod.moveTimeout = shared.moveTimeout; break; }
+      channel.rods.push_back(rod); selectedRod_ = int(channel.rods.size()) - 1; markParametersDirty(); }
+  }
+  tooltip("Add a Rod with the next available ID to this channel.");
+  ImGui::SameLine();
+  if (ImGui::Button("Remove Selected Rod") && selectedRod_ >= 0 && static_cast<size_t>(selectedRod_) < channel.rods.size()) {
+    const int id = int(channel.rods[selectedRod_].id);
+    const bool referenced = std::any_of(channel.layerMembers.begin(), channel.layerMembers.end(), [id](const ff::LayerMembership &m){ return int(m.rod) == id || m.leftNeighbor == id || m.rightNeighbor == id; }) || std::any_of(channel.clearanceRules.begin(), channel.clearanceRules.end(), [id](const ff::PairClearanceRule &r){ return int(r.first) == id || int(r.second) == id; });
+    if (referenced) parameterNotice_ = "Remove layer memberships and clearance rules that reference this Rod first.";
+    else { eraseAt(channel.rods, selectedRod_); selectedRod_ = std::max(0, selectedRod_ - 1); markParametersDirty(); }
+  }
+  tooltip("Remove the selected Rod. A Rod referenced by a layer or clearance rule must be unlinked first.");
+  if (selectedRod_ >= 0 && static_cast<size_t>(selectedRod_) < channel.rods.size()) {
+    auto &rod = channel.rods[selectedRod_]; ImGui::SeparatorText("Selected Rod"); ImGui::Text("Rod ID: %d", int(rod.id));
+    bool changed = inputString("Rod Name", rod.name);
+    changed |= ImGui::InputInt("Hard Min (count)", &rod.hardMin);
+    changed |= ImGui::InputInt("Hard Max (count)", &rod.hardMax);
+    changed |= ImGui::InputInt("Soft Min (count)", &rod.softMin);
+    changed |= ImGui::InputInt("Soft Max (count)", &rod.softMax);
+    changed |= ImGui::InputInt("Zero Position (count)", &rod.zeroPosition);
+    changed |= ImGui::InputInt("Safe Position (count)", &rod.safePosition);
+    changed |= ImGui::Checkbox("Safe Position Valid", &rod.safePositionValid);
+    changed |= ImGui::InputDouble("P0 (mm)", &rod.p0);
+    changed |= ImGui::InputDouble("P1 (mm/count)", &rod.p1);
+    changed |= ImGui::InputInt("Inward Direction", &rod.inwardDirection);
+    if (changed) markParametersDirty();
+  }
+  ImGui::EndTabItem();
+}
+
+void MainUi::drawParameterLayers(ff::FFChannelConfig& channel) {
+  if (!ImGui::BeginTabItem("Layer Memberships")) return;
+  ImGui::SeparatorText("Layer Memberships");
+  if (ImGui::BeginTable("LayerMembershipTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 130))) {
+    ImGui::TableSetupColumn("Rod"); ImGui::TableSetupColumn("Layer"); ImGui::TableSetupColumn("Role"); ImGui::TableSetupColumn("Left Neighbor"); ImGui::TableSetupColumn("Right Neighbor"); ImGui::TableHeadersRow();
+    for (size_t i = 0; i < channel.layerMembers.size(); ++i) {
+      const auto &m = channel.layerMembers[i]; ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
+      if (ImGui::Selectable(std::to_string(int(m.rod)).c_str(), selectedLayerMember_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedLayerMember_ = int(i);
+      ImGui::TableSetColumnIndex(1); ImGui::Text("%d", m.layer); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", m.role); ImGui::TableSetColumnIndex(3); ImGui::Text("%d", m.leftNeighbor); ImGui::TableSetColumnIndex(4); ImGui::Text("%d", m.rightNeighbor);
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+  }
+  if (ImGui::Button("Add Layer Member")) { channel.layerMembers.push_back({}); selectedLayerMember_ = int(channel.layerMembers.size()) - 1; markParametersDirty(); }
+  tooltip("Add a layer-membership record for this channel.");
+  ImGui::SameLine();
+  if (ImGui::Button("Remove Selected Member") && eraseAt(channel.layerMembers, selectedLayerMember_)) { selectedLayerMember_ = std::max(0, selectedLayerMember_ - 1); markParametersDirty(); }
+  tooltip("Remove the selected layer-membership record.");
+  if (selectedLayerMember_ >= 0 && static_cast<size_t>(selectedLayerMember_) < channel.layerMembers.size()) {
+    auto &m = channel.layerMembers[selectedLayerMember_]; ImGui::Text("Selected Layer Membership"); int rod = int(m.rod);
+    bool changed = ImGui::InputInt("Member Rod", &rod);
+    changed |= ImGui::InputInt("Member Layer", &m.layer);
+    changed |= ImGui::InputInt("Member Role", &m.role);
+    changed |= ImGui::InputInt("Member Left Neighbor", &m.leftNeighbor);
+    changed |= ImGui::InputInt("Member Right Neighbor", &m.rightNeighbor);
+    if (changed) { m.rod = static_cast<ff::RodId>(std::clamp(rod, 0, 255)); markParametersDirty(); }
+  }
+  ImGui::EndTabItem();
+}
+
+void MainUi::drawParameterClearance(ff::FFChannelConfig& channel) {
+  if (!ImGui::BeginTabItem("Clearance Rules")) return;
+  ImGui::SeparatorText("Clearance Rules");
+  if (ImGui::BeginTable("ClearanceRuleTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 120))) {
+    ImGui::TableSetupColumn("Layer"); ImGui::TableSetupColumn("Rod A"); ImGui::TableSetupColumn("Rod B"); ImGui::TableSetupColumn("Minimum Clearance (mm)"); ImGui::TableHeadersRow();
+    for (size_t i = 0; i < channel.clearanceRules.size(); ++i) {
+      const auto &r = channel.clearanceRules[i]; ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
+      if (ImGui::Selectable(std::to_string(r.layer).c_str(), selectedClearanceRule_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedClearanceRule_ = int(i);
+      ImGui::TableSetColumnIndex(1); ImGui::Text("%d", int(r.first)); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", int(r.second)); ImGui::TableSetColumnIndex(3); ImGui::Text("%.4f", r.minimumClearanceMm);
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+  }
+  if (ImGui::Button("Add Clearance Rule")) { channel.clearanceRules.push_back({}); selectedClearanceRule_ = int(channel.clearanceRules.size()) - 1; markParametersDirty(); }
+  tooltip("Add a minimum-clearance rule for a pair of Rods.");
+  ImGui::SameLine();
+  if (ImGui::Button("Remove Selected Rule") && eraseAt(channel.clearanceRules, selectedClearanceRule_)) { selectedClearanceRule_ = std::max(0, selectedClearanceRule_ - 1); markParametersDirty(); }
+  tooltip("Remove the selected clearance rule.");
+  if (selectedClearanceRule_ >= 0 && static_cast<size_t>(selectedClearanceRule_) < channel.clearanceRules.size()) {
+    auto &r = channel.clearanceRules[selectedClearanceRule_]; ImGui::Text("Selected Clearance Rule"); int first = int(r.first), second = int(r.second);
+    bool changed = ImGui::InputInt("Rule Layer", &r.layer);
+    changed |= ImGui::InputInt("Rule Rod A", &first);
+    changed |= ImGui::InputInt("Rule Rod B", &second);
+    changed |= ImGui::InputDouble("Rule Minimum Clearance (mm)", &r.minimumClearanceMm);
+    if (changed) { r.first = static_cast<ff::RodId>(std::clamp(first, 0, 255)); r.second = static_cast<ff::RodId>(std::clamp(second, 0, 255)); markParametersDirty(); }
+  }
+  ImGui::EndTabItem();
+}
+
 } // namespace ff_gui

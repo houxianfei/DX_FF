@@ -107,7 +107,7 @@ JSON 示例：
 | 后端接口 | MightyZap 能力 |
 |---|---|
 | `open` / `close` | `OpenMightyZap` / `CloseMightyZap` |
-| `setGoal` | `GoalPosition` 及速度参数 |
+| `setGoal` | `GoalPosition`；速度在连接初始化时统一设置 |
 | `readStatus` | `PresentPosition`、`ReadError` |
 | `enable` | `ForceEnable` |
 | `stop` / `stopAll` | `ForceEnable(id, false)`；仅作用于适配器已接触过的 ID |
@@ -118,7 +118,7 @@ JSON 示例：
 
 ### 当前同步语义
 
-`IControllerBackend::setGoalsSynchronous()` 表示“作为一组目标提交”的扩展点。当前 Simulation 与 MightyZap 适配实现均逐杆调用 `setGoal()` / `GoalPosition()`；因此它不能提供厂商总线同步写或硬实时同步保证。`MotionRequest::allowSoftwareSynchronousStart` 也不把不同串口的命令升级为硬实时同步。若工程需要同步启动，集成方必须在后端中实现并验证厂商同步写机制，并保持同一安全校验语义。
+`IControllerBackend::setGoalsSynchronous()` 表示“作为一组目标提交”的扩展点。当前 MightyZap 适配实现于连接时按 `motor_parameters.speed_limit_raw` 为各杆设置一次 `GoalSpeed`，运动时连续写 `GoalPosition`；Simulation 在一次后端调用中更新组内目标。它不能提供厂商总线同步写或硬实时同步保证。`MotionRequest::allowSoftwareSynchronousStart` 也不把不同串口的命令升级为硬实时同步。严格同步启动需要另行实现并验证厂商同步写机制。
 
 ## 5. 生命周期
 
@@ -150,9 +150,9 @@ machine.disconnect();
 ff::MotionRequest request;
 request.allowSoftwareSynchronousStart = true;
 request.targets = {
-    {{ff::ChannelId::CH1, 0}, 1200, 300.0},
-    {{ff::ChannelId::CH2, 0},  900, 250.0},
-    {{ff::ChannelId::CH3, 2}, 1500, 280.0}
+    {{ff::ChannelId::CH1, 0}, 1200},
+    {{ff::ChannelId::CH2, 0},  900},
+    {{ff::ChannelId::CH3, 2}, 1500}
 };
 
 auto receipt = machine.submitMotion(request);
@@ -183,9 +183,9 @@ auto result = machine.moveChannelToSafePositions(ff::ChannelId::CH1);
 
 ```cpp
 std::vector<ff::RodTarget> targets = {
-    {{ff::ChannelId::CH1, 0}, 1200, 300.0},
-    {{ff::ChannelId::CH1, 1},  950, 300.0},
-    {{ff::ChannelId::CH1, 2}, 1100, 300.0}
+    {{ff::ChannelId::CH1, 0}, 1200},
+    {{ff::ChannelId::CH1, 1},  950},
+    {{ff::ChannelId::CH1, 2}, 1100}
 };
 
 auto result = channel->moveAllToPositions(targets);

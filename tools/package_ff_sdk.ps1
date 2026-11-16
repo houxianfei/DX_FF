@@ -41,6 +41,7 @@ New-Item "$out\config" -ItemType Directory -Force | Out-Null
 
 Copy-Item "$root\include\DX_FF.h" "$out\include\DX_FF.h"
 Copy-Item "$root\include\DX_FF_Types.h" "$out\include\DX_FF_Types.h"
+Copy-Item "$root\include\DX_FF_MotionPolicy.h" "$out\include\DX_FF_MotionPolicy.h"
 Copy-Item $library "$out\lib\$Platform\$Configuration\ff_application.lib"
 Copy-Item $dll "$out\bin\$Platform\$Configuration\ff_application.dll"
 Copy-Item "$root\third_party\MightyZap\bin\CppDllMightyZap_Ver2010.dll" "$out\bin\$Platform\$Configuration\CppDllMightyZap_Ver2010.dll"

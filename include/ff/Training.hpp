@@ -70,6 +70,13 @@ struct TrainingSession {
   bool complete{false};
 };
 
+struct TrainingArchive {
+  std::string machineId, configVersion;
+  std::int64_t createdUnixSeconds{0};
+  int selectedChannel{0};
+  std::array<std::optional<TrainingSession>,3> channels{};
+};
+
 class TrainingAnalysis {
 public:
   static std::uint64_t simulatedEnergy(TrainingSource source, double positionMm,
@@ -97,6 +104,8 @@ public:
       double windowWidthMm = 3.0);
   static Result<void> saveSession(const std::string &, const TrainingSession &);
   static Result<TrainingSession> loadSession(const std::string &);
+  static Result<void> saveArchive(const std::string &, const TrainingArchive &);
+  static Result<TrainingArchive> loadArchive(const std::string &);
 };
 
 // Hardware acquisition is isolated from the Training UI.  The first release

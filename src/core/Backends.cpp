@@ -53,7 +53,7 @@ public:
     return Result<void>::success();
   }
   bool isOpen() const noexcept override { return open_; }
-  Result<void> setGoal(RodId id, int32_t p, double) override {
+  Result<void> setGoal(RodId id, int32_t p) override {
     if (!open_)
       return Result<void>::failure(ErrorCode::NotConnected);
     auto &s = rods_[id];
@@ -67,7 +67,7 @@ public:
   }
   Result<void> setGoalsSynchronous(const std::vector<RodTarget> &ts) override {
     for (auto &t : ts) {
-      auto x = setGoal(t.address.rod, t.position, t.velocity);
+      auto x = setGoal(t.address.rod, t.position);
       if (!x)
         return x;
     }
@@ -86,7 +86,7 @@ public:
     rods_[id].enabled = e;
     return Result<void>::success();
   }
-  Result<void> home(RodId id) override { return setGoal(id, 0, 0); }
+  Result<void> home(RodId id) override { return setGoal(id, 0); }
   Result<RodStatus> readStatus(RodId id) override {
     if (!open_)
       return Result<RodStatus>::failure(ErrorCode::NotConnected);
@@ -114,13 +114,81 @@ class MightyZapControllerBackend final : public IControllerBackend {
   bool open_{false};
   std::mutex mutex_;
   std::unordered_set<RodId> ids_;
+  std::vector<RodConfig> configs_;
 
 public:
+  Result<void> configureRods(const std::vector<RodConfig> &configs) override {
+    configs_ = configs;
+    ids_.clear();
+    for (const auto &config : configs) {
+      ids_.insert(config.id);
+    }
+    return Result<void>::success();
+  }
   Result<void> open(const SerialConfig &c) override {
     std::wstring w(c.portName.begin(), c.portName.end());
     if (zap_.OpenMightyZap(w.c_str(), c.baudRate)) {
       open_ = true;
       zap_.SerialTimeout(1, 0, 1, 1, 1);
+      const auto failConfiguration = [this](std::string message) {
+        zap_.CloseMightyZap();
+        open_ = false;
+        return Result<void>::failure(ErrorCode::Communication, message);
+      };
+      for (const auto &rod : configs_) {
+        const int id = rod.id;
+        const short speed = static_cast<short>(rod.maxVelocity);
+        const auto acceleration = static_cast<unsigned char>(rod.maxAcceleration);
+        const auto deceleration = static_cast<unsigned char>(rod.maxDeceleration);
+        short currentShort = -1, currentLong = -1;
+        zap_.GetShortStrokeLimit(id, currentShort);
+        zap_.GetLongStrokeLimit(id, currentLong);
+        if (currentShort < 0 || currentLong < 0 || currentShort > currentLong)
+          return failConfiguration("Unable to read motor stroke limits for Rod " +
+                                   std::to_string(id));
+        if (rod.hardMin < currentShort || rod.hardMax > currentLong)
+          return failConfiguration("Configured stroke limits would expand motor travel for Rod " +
+                                   std::to_string(id) + "; inspect physical limits");
+        short current = -1;
+        if (currentShort != rod.hardMin)
+          zap_.SetShortStrokeLimit(id, static_cast<short>(rod.hardMin));
+        current = -1;
+        zap_.GetShortStrokeLimit(id, current);
+        if (current != rod.hardMin)
+          return failConfiguration("Unable to configure motor short stroke limit for Rod " + std::to_string(id));
+        current = -1;
+        if (currentLong != rod.hardMax)
+          zap_.SetLongtStrokeLimit(id, static_cast<short>(rod.hardMax));
+        current = -1;
+        zap_.GetLongStrokeLimit(id, current);
+        if (current != rod.hardMax)
+          return failConfiguration("Unable to configure motor long stroke limit for Rod " + std::to_string(id));
+        current = -1;
+        zap_.Read_Addr(id, 21, 2, current);
+        if (current != speed)
+          zap_.Write_Addr(id, 21, 2, speed);
+        current = -1;
+        zap_.Read_Addr(id, 21, 2, current);
+        if (current != speed)
+          return failConfiguration("Unable to configure motor speed limit for Rod " + std::to_string(id));
+        current = -1;
+        zap_.Read_Addr(id, 33, 1, current);
+        if (current != acceleration)
+          zap_.Acceleration(id, acceleration);
+        current = -1;
+        zap_.Read_Addr(id, 33, 1, current);
+        if (current != acceleration)
+          return failConfiguration("Unable to configure motor acceleration for Rod " + std::to_string(id));
+        current = -1;
+        zap_.Read_Addr(id, 34, 1, current);
+        if (current != deceleration)
+          zap_.Deceleration(id, deceleration);
+        current = -1;
+        zap_.Read_Addr(id, 34, 1, current);
+        if (current != deceleration)
+          return failConfiguration("Unable to configure motor deceleration for Rod " + std::to_string(id));
+        zap_.GoalSpeed(id, speed);
+      }
       return Result<void>::success();
     }
     return Result<void>::failure(ErrorCode::Communication,
@@ -133,7 +201,7 @@ public:
     return Result<void>::success();
   }
   bool isOpen() const noexcept override { return open_; }
-  Result<void> setGoal(RodId id, int32_t p, double) override {
+  Result<void> setGoal(RodId id, int32_t p) override {
     if (!open_)
       return Result<void>::failure(ErrorCode::NotConnected);
     ids_.insert(id);
@@ -141,10 +209,11 @@ public:
     return Result<void>::success();
   }
   Result<void> setGoalsSynchronous(const std::vector<RodTarget> &ts) override {
+    if (!open_)
+      return Result<void>::failure(ErrorCode::NotConnected);
     for (auto &t : ts) {
-      auto x = setGoal(t.address.rod, t.position, t.velocity);
-      if (!x)
-        return x;
+      ids_.insert(t.address.rod);
+      zap_.GoalPosition(t.address.rod, static_cast<short>(t.position));
     }
     return Result<void>::success();
   }
@@ -166,7 +235,7 @@ public:
     zap_.ForceEnable(id, e);
     return Result<void>::success();
   }
-  Result<void> home(RodId id) override { return setGoal(id, 0, 0); }
+  Result<void> home(RodId id) override { return setGoal(id, 0); }
   Result<RodStatus> readStatus(RodId id) override {
     if (!open_)
       return Result<RodStatus>::failure(ErrorCode::NotConnected);

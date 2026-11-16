@@ -6,24 +6,22 @@
 
 namespace ff {
 namespace {
-GuiDriver* currentDriver = nullptr;
 Result<void> fail(ErrorCode code, const std::string& message) {
   return Result<void>::failure(code, message);
 }
 } // namespace
 
-GuiDriver::GuiDriver() { currentDriver = this; }
-GuiDriver* activeGuiDriver() noexcept { return currentDriver; }
+GuiDriver::GuiDriver() = default;
 
 ::FF::Address publicAddress(RodAddress a) {
   return {static_cast<int>(a.channel), static_cast<int>(a.rod)};
 }
 ::FF::Target publicTarget(const RodTarget& t) {
-  return {publicAddress(t.address), t.position, t.velocity};
+  return {publicAddress(t.address), t.position};
 }
 RodTarget privateTarget(const ::FF::Target& t) {
   return {{static_cast<ChannelId>(t.address.channel),
-           static_cast<RodId>(t.address.rod)}, t.position, t.velocity};
+           static_cast<RodId>(t.address.rod)}, t.position};
 }
 Result<void> privateResult(const ::FF::Result& r) {
   if (r) return Result<void>::success();
@@ -79,18 +77,14 @@ Result<void> GuiDriver::refreshRod(RodAddress a) {
   return privateResult(driver_.refresh_rod(publicAddress(a)));
 }
 Result<void> GuiDriver::setRodTarget(const RodTarget& t) {
-  return privateResult(driver_.send_rod(publicAddress(t.address),t.position,t.velocity));
+  return privateResult(driver_.send_rod(publicAddress(t.address),t.position));
 }
 Result<void> GuiDriver::setRodTargets(const std::vector<RodTarget>& targets) {
   auto refreshed=driver_.refresh();
   if (!refreshed) return privateResult(refreshed);
   std::vector<::FF::Target> complete;
-  const auto machine=driver_.machine_info();
   for (const auto& current:driver_.m_current_positions) {
-    double velocity=0;
-    for (const auto& rod:machine.channels[current.address.channel].rods)
-      if (rod.address.rod==current.address.rod) { velocity=rod.maxVelocity; break; }
-    complete.push_back({current.address,current.encoder,velocity});
+    complete.push_back({current.address,current.encoder});
   }
   for (const auto& t:targets) {
     auto it=std::find_if(complete.begin(),complete.end(),[&](const auto& entry) {
@@ -100,14 +94,19 @@ Result<void> GuiDriver::setRodTargets(const std::vector<RodTarget>& targets) {
     if (it==complete.end()) return fail(ErrorCode::InvalidTarget,"Unknown Rod target");
     *it=publicTarget(t);
   }
-  auto submitted=driver_.set_target_positions(complete);
-  if (!submitted) return privateResult(submitted);
-  return privateResult(driver_.send_positions());
+  return privateResult(driver_.send_rods(complete));
 }
 Result<void> GuiDriver::validateRodTargets(const std::vector<RodTarget>& targets) {
-  std::vector<::FF::Target> values;
-  for (const auto& t:targets) values.push_back(publicTarget(t));
-  return privateResult(driver_.validate_target_positions(values));
+  if (!config_) return fail(ErrorCode::InvalidConfiguration,"No configuration loaded");
+  auto refreshed=refresh();
+  if (!refreshed) return refreshed;
+  for (const auto& target:targets) {
+    auto rod=rodConfig(target.address);
+    if (!rod || target.position<rod->softMin || target.position>rod->softMax ||
+        target.position<rod->hardMin || target.position>rod->hardMax)
+      return fail(ErrorCode::InvalidTarget,"Invalid Rod target");
+  }
+  return Result<void>::success();
 }
 Result<void> GuiDriver::cancelMotion() { return privateResult(driver_.stop()); }
 Result<void> GuiDriver::emergencyStop() { return privateResult(driver_.emergency_stop()); }
@@ -144,18 +143,20 @@ std::optional<RodConfig> GuiDriver::rodConfig(RodAddress address) const {
   if (it==rods.end()) return std::nullopt;
   return *it;
 }
-Result<PositionFileData> GuiPositionFiles::load(const std::string& path,const FFConfig& config) {
-  auto* gui=activeGuiDriver();
-  auto r=gui->sdk().load_positions(path);
-  if (!r) return Result<PositionFileData>::failure(ErrorCode::InvalidTarget,r.message);
-  PositionFileData out{config.machineId,config.configVersion,gui->sdk().m_position_summary,{}};
-  for (const auto& value:gui->sdk().m_target_positions)
-    out.targets.push_back(privateTarget({value.address,value.encoder,value.velocity}));
+Result<PositionFileData> GuiPositionFiles::load(GuiDriver& gui,const std::string& path,const FFConfig& config) {
+  auto r=gui.sdk().load_positions(path);
+  if (!r) return Result<PositionFileData>::failure(ErrorCode::InvalidTarget,r.result.message);
+  PositionFileData out{config.machineId,config.configVersion,r.value.summary,{}};
+  for (const auto& value:r.value.targets)
+    out.targets.push_back(privateTarget(value));
   return Result<PositionFileData>::success(std::move(out));
 }
-Result<void> GuiPositionFiles::save(const std::string& path,const PositionFileData& file) {
-  (void)file;
-  return privateResult(activeGuiDriver()->sdk().record_positions(path,file.summary));
+Result<void> GuiPositionFiles::save(GuiDriver& gui,const std::string& path,const PositionFileData& file) {
+  ::FF::PositionSet positions;
+  positions.summary=file.summary;
+  for (const auto& target : file.targets)
+    positions.targets.push_back(publicTarget(target));
+  return privateResult(gui.sdk().save_positions(path,positions));
 }
 Result<void> GuiPositionFiles::validate(const PositionFileData& file,const FFConfig& config,int count) {
   if (file.machineId!=config.machineId || file.configVersion!=config.configVersion)

@@ -174,11 +174,92 @@ Result<void> FFApplicationService::executePlan(const MotionPlan &p) {
   }
   std::vector<RodTarget> steps;
   for (const auto &step : p.steps)
-    steps.push_back({step.address, step.position, step.velocity});
-  return executeSteps(steps, false);
+    steps.push_back({step.address, step.position});
+  return executeGroup(steps);
 }
 Result<void> FFApplicationService::moveRodAndWait(const RodTarget &target) {
   return executeSteps({target}, true);
+}
+Result<void> FFApplicationService::executeGroup(
+    const std::vector<RodTarget> &targets) {
+  std::unique_lock l(impl_->mutex);
+  if (!impl_->machine || !impl_->connected)
+    return Result<void>::failure(ErrorCode::NotConnected);
+  if (impl_->moving)
+    return Result<void>::failure(ErrorCode::Busy, "Motion is in progress");
+  if (targets.empty())
+    return Result<void>::failure(ErrorCode::InvalidTarget, "Empty motion plan");
+  impl_->moving = true;
+  impl_->cancelRequested.store(false);
+  auto finish = [&](Result<void> result, bool stop) {
+    if (stop) impl_->machine->stopAll();
+    impl_->moving = false;
+    return result;
+  };
+  auto fresh = impl_->machine->refreshStatus();
+  if (!fresh) return finish(fresh, false);
+  auto checked = MotionPlanner::plan(impl_->machine->config(),
+                                     impl_->machine->status(),
+                                     {targets, false});
+  if (!checked)
+    return finish(Result<void>::failure(checked.error, checked.message),
+                  false);
+  auto submitted = impl_->machine->submitMotion({targets, false});
+  if (!submitted)
+    return finish(Result<void>::failure(submitted.error, submitted.message),
+                  true);
+  struct WaitTarget {
+    Rod *rod;
+    RodConfig config;
+    std::int32_t position;
+    std::chrono::steady_clock::time_point deadline;
+    std::optional<std::chrono::steady_clock::time_point> stableSince;
+  };
+  std::vector<WaitTarget> pending;
+  const auto submittedAt = std::chrono::steady_clock::now();
+  for (const auto &target : targets) {
+    auto *rod = impl_->machine->findRod(target.address);
+    if (!rod)
+      return finish(Result<void>::failure(ErrorCode::RodNotFound), true);
+    const auto config = rod->config();
+    pending.push_back({rod, config, target.position,
+                       submittedAt + config.moveTimeout, std::nullopt});
+  }
+  for (;;) {
+    if (impl_->cancelRequested.load())
+      return finish(Result<void>::failure(ErrorCode::Busy, "Motion stopped"),
+                    true);
+    auto refreshed = impl_->machine->refreshStatus();
+    if (!refreshed) return finish(refreshed, true);
+    const auto now = std::chrono::steady_clock::now();
+    bool allStable = true;
+    for (auto &item : pending) {
+      const auto status = item.rod->status();
+      if (status.alarm || status.state == RodState::Fault)
+        return finish(Result<void>::failure(ErrorCode::DeviceAlarm,
+                                            "Rod fault while moving"), true);
+      const bool atTarget = status.positionValid &&
+          std::abs(status.actualPosition - item.position) <=
+              item.config.positionTolerance;
+      if (atTarget) {
+        if (!item.stableSince) item.stableSince = now;
+      } else {
+        item.stableSince.reset();
+      }
+      if (!item.stableSince || now - *item.stableSince < item.config.stableTime)
+        allStable = false;
+      if ((!item.stableSince ||
+           now - *item.stableSince < item.config.stableTime) &&
+          now >= item.deadline)
+        return finish(Result<void>::failure(ErrorCode::Timeout,
+                                            "Timed out waiting for Rod target"),
+                      true);
+    }
+    if (allStable) return finish(Result<void>::success(), false);
+    l.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    l.lock();
+  }
 }
 Result<void> FFApplicationService::executeSteps(const std::vector<RodTarget> &steps,
                                                 bool scopedRefresh) {

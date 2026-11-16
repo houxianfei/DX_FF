@@ -122,14 +122,16 @@ struct SerialConfig {
 struct RodConfig {
   RodId id{};
   std::string name;
+  // Position limits and targets are encoder counts; optical positions are mm.
   std::int32_t hardMin{0}, hardMax{0};
   std::int32_t softMin{0}, softMax{0};
   std::int32_t zeroPosition{0}, safePosition{0};
   bool safePositionValid{false};
-  // optical_position = P0 + P1*u,
-  // where u is the encoder position.
+  // optical_position_mm = P0(mm) + P1(mm/count) * encoder_count.
   double p0{0.0}, p1{1.0};
   int inwardDirection{1};
+  // Shared JSON motor_parameters raw registers: speed 1..1023,
+  // acceleration/deceleration 0..255. These are not count/s units.
   double maxVelocity{0.0}, maxAcceleration{0.0}, maxDeceleration{0.0};
   std::int32_t positionTolerance{0};
   std::chrono::milliseconds stableTime{0}, moveTimeout{5000};
@@ -213,7 +215,6 @@ struct FFStatus {
 struct RodTarget {
   RodAddress address;
   std::int32_t position{0};
-  double velocity{0.0};
 };
 
 struct MotionRequest {
@@ -237,12 +238,9 @@ struct MotionReceipt {
   }
 };
 
-enum class PlanStepKind { MoveToSafe, MoveToTarget };
 struct MotionPlanStep {
-  PlanStepKind kind{PlanStepKind::MoveToTarget};
   RodAddress address{};
   std::int32_t position{0};
-  double velocity{0.0};
   std::string reason;
 };
 

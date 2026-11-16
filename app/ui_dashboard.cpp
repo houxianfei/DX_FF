@@ -10,6 +10,12 @@
 #include <sstream>
 namespace fs = std::filesystem;
 namespace ff_gui {
+void MainUi::drawChannel(int index, const ff::FFStatus &s) {
+  auto &c = s.channels[index];
+  ImGui::Text("CH%d: %zu configured device(s)", index + 1, c.rods.size());
+}
+
+
 void MainUi::draw() {
   if (!configLoaded_ || !service_.connected()) {
     welcome();
@@ -161,8 +167,7 @@ void MainUi::dashboard() {
                                 rodIndex < config->channels[i].rods.size(); rodIndex++)
         targets_.push_back(
             {{static_cast<ff::ChannelId>(i), config->channels[i].rods[rodIndex].id},
-             ch.rods[rodIndex].actualPosition,
-             100});
+             ch.rods[rodIndex].actualPosition});
     }
     targetsInitialized_ = true;
   }
@@ -218,7 +223,7 @@ void MainUi::dashboard() {
                                rod < config->channels[i].rods.size(); ++rod)
           preset.push_back({{static_cast<ff::ChannelId>(i),
                              config->channels[i].rods[rod].id},
-                            channel.rods[rod].actualPosition, 100.0});
+                            channel.rods[rod].actualPosition});
       }
       if (savePreset(selectedPresetSlot_, preset)) {
         targets_ = std::move(preset);
@@ -264,7 +269,7 @@ void MainUi::dashboard() {
     if (ImGuiFileDialog::Instance()->IsOk()) {
       const auto path = ImGuiFileDialog::Instance()->GetFilePathName();
       const auto config = service_.config();
-      auto loaded = config ? ff::GuiPositionFiles::load(path, *config) :
+      auto loaded = config ? ff::GuiPositionFiles::load(service_, path, *config) :
           ff::Result<ff::PositionFileData>::failure(ff::ErrorCode::NotReady);
       if (!loaded) {
         notice_ = "Position file rejected: " + loaded.message;

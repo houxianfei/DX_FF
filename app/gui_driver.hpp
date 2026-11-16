@@ -42,7 +42,6 @@ private:
   bool connected_{false};
 };
 
-GuiDriver* activeGuiDriver() noexcept;
 ::FF::Address publicAddress(RodAddress);
 ::FF::Target publicTarget(const RodTarget&);
 RodTarget privateTarget(const ::FF::Target&);
@@ -54,8 +53,8 @@ struct PositionFileData {
 };
 class GuiPositionFiles {
 public:
-  static Result<PositionFileData> load(const std::string&,const FFConfig&);
-  static Result<void> save(const std::string&,const PositionFileData&);
+  static Result<PositionFileData> load(GuiDriver&,const std::string&,const FFConfig&);
+  static Result<void> save(GuiDriver&,const std::string&,const PositionFileData&);
   static Result<void> validate(const PositionFileData&,const FFConfig&,int);
   static Result<void> execute(GuiDriver&,const PositionFileData&,bool);
 };

@@ -116,15 +116,15 @@ bool MainUi::savePreset(int slot,
   ff::PositionFileData file{config->machineId, config->configVersion,
       slot == 0 ? "Main UI Slot Initial" : "Main UI Slot" + std::to_string(slot),
       targets};
-  return static_cast<bool>(ff::GuiPositionFiles::save(presetPath(slot), file));
+  return static_cast<bool>(ff::GuiPositionFiles::save(service_, presetPath(slot), file));
 }
 
-std::vector<ff::RodTarget> MainUi::loadPreset(int slot) const {
+std::vector<ff::RodTarget> MainUi::loadPreset(int slot) {
   const auto config = service_.config();
   if (!config) return {};
   const auto path = fs::exists(presetPath(slot)) ? presetPath(slot) :
       (fs::path(presetDirectory_) / ("slot_" + std::to_string(slot) + ".csv")).string();
-  auto file = ff::GuiPositionFiles::load(path, *config);
+  auto file = ff::GuiPositionFiles::load(service_, path, *config);
   if (!file || !ff::GuiPositionFiles::validate(file.value, *config,
                                             service_.activeChannelCount())) return {};
   return file.value.targets;

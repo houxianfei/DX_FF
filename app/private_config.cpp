@@ -207,12 +207,18 @@ Result<void> FFConfigIO::validate(const FFConfig &config) {
       ++rodCount;
       if (!ids.insert(static_cast<int>(rod.id)).second)
         return Result<void>::failure(ErrorCode::DuplicateId, "Duplicate Rod ID");
-      if (rod.hardMin > rod.hardMax || rod.softMin < rod.hardMin ||
+      if (rod.hardMin < 0 || rod.hardMax > 4095 ||
+          rod.hardMin > rod.hardMax || rod.softMin < rod.hardMin ||
           rod.softMax > rod.hardMax || rod.softMin > rod.softMax ||
           (rod.safePositionValid && (rod.safePosition < rod.softMin ||
                                      rod.safePosition > rod.softMax)) ||
-          std::abs(rod.p1) < 1e-12 || rod.maxVelocity < 0 ||
-          rod.maxAcceleration < 0 || rod.maxDeceleration < 0 ||
+          std::abs(rod.p1) < 1e-12 ||
+          rod.maxVelocity < 1 || rod.maxVelocity > 1023 ||
+          rod.maxAcceleration < 0 || rod.maxAcceleration > 255 ||
+          rod.maxDeceleration < 0 || rod.maxDeceleration > 255 ||
+          std::floor(rod.maxVelocity) != rod.maxVelocity ||
+          std::floor(rod.maxAcceleration) != rod.maxAcceleration ||
+          std::floor(rod.maxDeceleration) != rod.maxDeceleration ||
           rod.positionTolerance < 0 || rod.stableTime.count() < 0 ||
           rod.moveTimeout.count() < 0)
         return Result<void>::failure(ErrorCode::InvalidConfiguration,
@@ -266,6 +272,14 @@ Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
   std::replace(text.begin(), text.end(), '\n', ' ');
   std::replace(text.begin(), text.end(), '\r', ' ');
   FFConfig c;
+  std::smatch motionMatch;
+  const std::regex motionPattern(R"("rod_motion"\s*:\s*\{([^{}]*)\})");
+  const std::string motion = std::regex_search(text, motionMatch, motionPattern)
+                                 ? motionMatch[1].str() : std::string{};
+  std::smatch motorMatch;
+  const std::regex motorPattern(R"("motor_parameters"\s*:\s*\{([^{}]*)\})");
+  const std::string motor = std::regex_search(text, motorMatch, motorPattern)
+                                ? motorMatch[1].str() : std::string{};
   c.machineId = strField(text, "machine_id", "FF-001");
   c.configVersion = strField(text, "config_version", "FF-CONFIG-1.0");
   c.maxActiveRodCount =
@@ -356,14 +370,14 @@ Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
       r.p0 = dblField(rs, "P0", dblField(rs, "stroke_bias"));
       r.p1 = dblField(rs, "P1", dblField(rs, "stroke_slope", 1));
       r.inwardDirection = intField(rs, "inward_direction", 1);
-      r.maxVelocity = dblField(rs, "max_velocity", 300);
-      r.maxAcceleration = dblField(rs, "max_acceleration", 100);
-      r.maxDeceleration = dblField(rs, "max_deceleration", 100);
-      r.positionTolerance = intField(rs, "position_tolerance", 5);
+      r.maxVelocity = dblField(motor, "speed_limit_raw", dblField(rs, "max_velocity", dblField(motion, "max_velocity", 300)));
+      r.maxAcceleration = dblField(motor, "acceleration_raw", dblField(rs, "max_acceleration", dblField(motion, "max_acceleration", 100)));
+      r.maxDeceleration = dblField(motor, "deceleration_raw", dblField(rs, "max_deceleration", dblField(motion, "max_deceleration", 100)));
+      r.positionTolerance = intField(rs, "position_tolerance", intField(motion, "position_tolerance", 5));
       r.stableTime =
-          std::chrono::milliseconds(intField(rs, "stable_time_ms", 100));
+          std::chrono::milliseconds(intField(rs, "stable_time_ms", intField(motion, "stable_time_ms", 100)));
       r.moveTimeout =
-          std::chrono::milliseconds(intField(rs, "move_timeout_ms", 5000));
+          std::chrono::milliseconds(intField(rs, "move_timeout_ms", intField(motion, "move_timeout_ms", 5000)));
       c.channels[idx].rods.push_back(r);
     }
     seen.insert(cid);
@@ -383,6 +397,21 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
   auto valid = validate(c);
   if (!valid)
     return valid;
+  const RodConfig *shared = nullptr;
+  bool sharedMotion = true;
+  for (const auto &channel : c.channels) {
+    for (const auto &rod : channel.rods) {
+      if (!shared) { shared = &rod; continue; }
+      if (rod.maxVelocity != shared->maxVelocity ||
+          rod.maxAcceleration != shared->maxAcceleration ||
+          rod.maxDeceleration != shared->maxDeceleration ||
+          rod.positionTolerance != shared->positionTolerance ||
+          rod.stableTime != shared->stableTime ||
+          rod.moveTimeout != shared->moveTimeout)
+        sharedMotion = false;
+    }
+  }
+  sharedMotion = sharedMotion && shared;
   std::ofstream f(fileName);
   if (!f)
     return Result<void>::failure(ErrorCode::BackendFailure,
@@ -392,22 +421,26 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
     << c.machineId << "\",\n  \"config_version\": \"" << c.configVersion
     << "\",\n  \"max_active_rod_count\": " << c.maxActiveRodCount
     << ",\n  \"status_expiration_ms\": " << c.statusExpiration.count()
-    << ",\n  \"channels\": [\n";
+    << ",\n  \"coordinate_units\": {\"encoder_position\": \"count\", \"optical_position\": \"mm\", \"motor_speed\": \"raw_0_1023\", \"motor_acceleration\": \"raw_0_255\"},\n";
+  if (sharedMotion) {
+    f << "  \"motor_parameters\": {\"speed_limit_raw\": " << shared->maxVelocity
+      << ", \"acceleration_raw\": " << shared->maxAcceleration
+      << ", \"deceleration_raw\": " << shared->maxDeceleration << "},\n";
+    f << "  \"rod_motion\": {\"coordinate_system\": \"encoder_counts\", \"position_tolerance\": "
+      << shared->positionTolerance << ", \"stable_time_ms\": " << shared->stableTime.count()
+      << ", \"move_timeout_ms\": " << shared->moveTimeout.count() << "},\n";
+  }
+  f << "  \"channels\": [\n";
   for (int i = 0; i < 3; i++) {
     const auto &ch = c.channels[i];
     f << "    {\n"
       << "      \"id\": \"" << channelName(ch.id) << "\",\n"
-      << "      \"controller\": {\n"
-      << "        \"name\": \"" << ch.controller.name << "\",\n"
-      << "        \"serial\": {\n"
-      << "          \"port\": \"" << ch.controller.serial.portName << "\",\n"
-      << "          \"baud_rate\": " << ch.controller.serial.baudRate << ",\n"
-      << "          \"timeout_ms\": " << ch.controller.serial.timeout.count()
-      << "\n        },\n"
-      << "        \"poll_period_ms\": " << ch.controller.pollPeriod.count()
-      << ",\n"
-      << "        \"retry_count\": " << ch.controller.retryCount
-      << "\n      },\n"
+      << "      \"controller\": {\"name\": \"" << ch.controller.name
+      << "\", \"serial\": {\"port\": \"" << ch.controller.serial.portName
+      << "\", \"baud_rate\": " << ch.controller.serial.baudRate
+      << ", \"timeout_ms\": " << ch.controller.serial.timeout.count()
+      << "}, \"poll_period_ms\": " << ch.controller.pollPeriod.count()
+      << ", \"retry_count\": " << ch.controller.retryCount << "},\n"
       << "      \"training_rod_id\": "
       << (ch.trainingRod ? std::to_string(int(*ch.trainingRod))
                          : std::string("null"))
@@ -435,27 +468,27 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
       << "      \"rods\": [\n";
     for (size_t j = 0; j < ch.rods.size(); j++) {
       auto &r = ch.rods[j];
-      f << "        {\n"
-        << "          \"id\": " << int(r.id) << ",\n"
-        << "          \"name\": \"" << r.name << "\",\n"
-        << "          \"hard_min\": " << r.hardMin << ",\n"
-        << "          \"hard_max\": " << r.hardMax << ",\n"
-        << "          \"soft_min\": " << r.softMin << ",\n"
-        << "          \"soft_max\": " << r.softMax << ",\n"
-        << "          \"zero_position\": " << r.zeroPosition << ",\n"
-        << "          \"safe_position\": " << r.safePosition << ",\n"
-        << "          \"safe_position_valid\": "
-        << (r.safePositionValid ? "true" : "false") << ",\n"
-        << "          \"P0\": " << r.p0 << ",\n"
-        << "          \"P1\": " << r.p1 << ",\n"
-        << "          \"inward_direction\": " << r.inwardDirection << ",\n"
-        << "          \"max_velocity\": " << r.maxVelocity << ",\n"
-        << "          \"max_acceleration\": " << r.maxAcceleration << ",\n"
-        << "          \"max_deceleration\": " << r.maxDeceleration << ",\n"
-        << "          \"position_tolerance\": " << r.positionTolerance << ",\n"
-        << "          \"stable_time_ms\": " << r.stableTime.count() << ",\n"
-        << "          \"move_timeout_ms\": " << r.moveTimeout.count() << "\n"
-        << "        }" << (j + 1 == ch.rods.size() ? "\n" : ",\n");
+      f << "        {\"id\": " << int(r.id)
+        << ", \"name\": \"" << r.name << "\""
+        << ", \"hard_min\": " << r.hardMin
+        << ", \"hard_max\": " << r.hardMax
+        << ", \"soft_min\": " << r.softMin
+        << ", \"soft_max\": " << r.softMax
+        << ", \"zero_position\": " << r.zeroPosition
+        << ", \"safe_position\": " << r.safePosition
+        << ", \"safe_position_valid\": "
+        << (r.safePositionValid ? "true" : "false")
+        << ", \"P0\": " << r.p0
+        << ", \"P1\": " << r.p1
+        << ", \"inward_direction\": " << r.inwardDirection;
+      if (!sharedMotion)
+        f << ", \"max_velocity\": " << r.maxVelocity
+        << ", \"max_acceleration\": " << r.maxAcceleration
+        << ", \"max_deceleration\": " << r.maxDeceleration
+        << ", \"position_tolerance\": " << r.positionTolerance
+        << ", \"stable_time_ms\": " << r.stableTime.count()
+        << ", \"move_timeout_ms\": " << r.moveTimeout.count();
+      f << "}" << (j + 1 == ch.rods.size() ? "\n" : ",\n");
     }
     f << "      ]\n    }" << (i == 2 ? "\n" : ",\n");
   }
