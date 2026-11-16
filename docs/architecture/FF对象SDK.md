@@ -281,7 +281,7 @@ if (checked) service.setRodTarget(target);           // 验证并下发
 
 Training API 位于 `ff/Training.hpp`，与 GUI 解耦。`TrainingSession` 使用 schema `FF-TRAIN-1` 保存扫描设置、样本、谷值候选、分配结果、保存瞬间的 Rod 状态和可执行目标集；会话必须携带 `machineId` 与 `configVersion`，上层在执行前应核对二者。
 
-`TrainingAnalysis` 提供灰度能量累加、仿真扫描能量、谷值检测、Layer 2 杆位的一对一最小行程分配、拖拽可行区间，以及会话 JSON 的读写。`training_rod_id` 始终由机台配置指定，必须是同 Channel 的 Layer 2 Rod。`ItekEnergySource` 是硬件采集扩展点；当前发行版不捆绑经验证的 Itek DLL 或相机配置，因此真实采集不可用，不能把 Simulation 扫描结果用于光学或机械验收。
+`TrainingAnalysis` 提供仿真扫描能量、谷值检测、Layer 2 杆位的一对一最小行程分配、拖拽可行区间，以及会话 JSON 的读写。图像采集和像素能量计算由调用方负责。`training_rod_id` 始终由机台配置指定，必须是同 Channel 的 Layer 2 Rod。`ItekEnergySource` 是硬件采集扩展点；当前发行版不捆绑经验证的 Itek DLL 或相机配置，因此真实采集不可用，不能把 Simulation 扫描结果用于光学或机械验收。
 
 ## 13. 文件关系
 

@@ -182,14 +182,6 @@ const char *trainingSourceName(TrainingSource source) noexcept {
   return "Unknown";
 }
 
-std::uint64_t TrainingAnalysis::accumulateGray(const std::uint8_t *pixels,
-                                                std::size_t count) {
-  if (!pixels) return 0;
-  std::uint64_t energy = 0;
-  for (std::size_t i = 0; i < count; ++i) energy += pixels[i];
-  return energy;
-}
-
 bool ItekEnergySource::available() const noexcept { return false; }
 Result<std::uint64_t> ItekEnergySource::captureEnergy() {
   return Result<std::uint64_t>::failure(

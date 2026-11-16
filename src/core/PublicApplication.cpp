@@ -406,9 +406,6 @@ ValueResult<Assignment> ff_driver::assign_training(int channel,
   report({});
   return {out,{}};
 }
-std::uint64_t ff_driver::accumulate_gray(const std::uint8_t* p,std::size_t n) {
-  auto result=ff::TrainingAnalysis::accumulateGray(p,n); report({}); return result;
-}
 std::uint64_t ff_driver::simulated_energy(TrainingSource source,double p,double start,double end) {
   const auto result=ff::TrainingAnalysis::simulatedEnergy(
     static_cast<ff::TrainingSource>(source),p,start,end);

@@ -69,7 +69,6 @@ public:
   // Training calculation. Samples and candidates use optical millimetres.
   ValueResult<Assignment> assign_training(int channel,
       const std::vector<double>& candidatesMm, int excludedRod = -1);
-  std::uint64_t accumulate_gray(const std::uint8_t* pixels, std::size_t count);
   std::uint64_t simulated_energy(TrainingSource source, double positionMm,
                                  double startMm, double endMm);
   double interpolate_energy(const std::vector<Sample>& samples, double positionMm);

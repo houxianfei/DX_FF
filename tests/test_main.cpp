@@ -382,8 +382,6 @@ int main() {
   valleySettings.maximumCount = 3;
   const auto valleys = TrainingAnalysis::findValleys(trainingSamples, valleySettings);
   assert(valleys.size() == 3);
-  const std::uint8_t gray[] = {0, 1, 127, 255};
-  assert(TrainingAnalysis::accumulateGray(gray, 4) == 383);
   assert(std::abs(valleys[1] - 5.0) < .35);
   assert(TrainingAnalysis::interpolateEnergy(trainingSamples, 5.0) <
          TrainingAnalysis::interpolateEnergy(trainingSamples, 4.0));

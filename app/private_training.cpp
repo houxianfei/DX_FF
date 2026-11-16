@@ -51,9 +51,6 @@ TrainingSession fromPublic(const ::FF::TrainingSession& s) {
 }
 } // namespace
 
-std::uint64_t GuiTrainingAnalysis::accumulateGray(const std::uint8_t* p,std::size_t n) {
-  return activeGuiDriver()->sdk().accumulate_gray(p,n);
-}
 std::uint64_t GuiTrainingAnalysis::simulatedEnergy(TrainingSource source,double p,double start,double end) {
   return activeGuiDriver()->sdk().simulated_energy(static_cast<::FF::TrainingSource>(source),p,start,end);
 }

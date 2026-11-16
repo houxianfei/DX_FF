@@ -72,10 +72,6 @@ struct TrainingSession {
 
 class TrainingAnalysis {
 public:
-  // Full-frame, 8-bit grayscale energy.  Camera adapters must convert colour
-  // pixels to grayscale before calling this method.
-  static std::uint64_t accumulateGray(const std::uint8_t *pixels,
-                                      std::size_t count);
   static std::uint64_t simulatedEnergy(TrainingSource source, double positionMm,
                                         double startMm, double endMm);
   static double interpolateEnergy(const std::vector<TrainingSample> &samples,
