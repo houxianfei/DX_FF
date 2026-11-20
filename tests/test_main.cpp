@@ -2,6 +2,8 @@
 #include "ff/Training.hpp"
 #include "ff/PositionFiles.hpp"
 #include <cassert>
+#include <crtdbg.h>
+#include <cstdlib>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -84,15 +86,87 @@ static FFConfig cfg() {
     r.safePositionValid = true;
     r.maxVelocity = 10;
     ch.rods.push_back(r);
+    ch.layerMembers.push_back({0,2,3,-1,-1});
   }
   return c;
 }
 int main() {
+  _set_abort_behavior(0,_WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+  _CrtSetReportMode(_CRT_ASSERT,_CRTDBG_MODE_FILE);
+  _CrtSetReportFile(_CRT_ASSERT,_CRTDBG_FILE_STDERR);
   auto loaded = FFConfigIO::load("config/defaults/ff_config.json");
   assert(loaded);
+  {
+    std::ifstream source("config/defaults/ff_config.json",std::ios::binary);
+    const std::string original((std::istreambuf_iterator<char>(source)),{});
+    const auto path=(std::filesystem::temp_directory_path()/"ff_invalid_config_probe.json").string();
+    const auto reject=[&](const std::string& before,const std::string& after) {
+      auto changed=original;
+      const auto at=changed.find(before);
+      assert(at!=std::string::npos);
+      changed.replace(at,before.size(),after);
+      std::ofstream(path,std::ios::binary)<<changed;
+      assert(!FFConfigIO::load(path));
+    };
+    reject("\"speed_limit_raw\": 1023","\"speed_limit_raw\": \"fast\"");
+    reject("\"speed_limit_raw\": 1023","\"speed_limit_raw\": 1023, \"speed_limit_raw\": 1023");
+    reject("\"hard_max\": 4095","\"hard_max\": 999999999999");
+    reject("\"inward_direction\": 1}",
+           "\"inward_direction\": 1, \"max_velocity\": 100}");
+    reject("\"rod_motion\": {\"coordinate_system\"",
+           "\"rod_motion\": {\"max_velocity\": 100, \"coordinate_system\"");
+    reject("\"channels\": [","\"channels\": [,");
+    std::filesystem::remove(path);
+  }
+  for (int bits=1;bits<8;++bits) {
+    std::array<bool,3> enabled{bool(bits&1),bool(bits&2),bool(bits&4)};
+    FFApplicationService selected;
+    const auto configured=selected.loadConfig("config/defaults/ff_config.json",true,{"","",""},enabled);
+    if (bits==1) {
+      assert(configured);
+      assert(selected.connect());
+      assert(selected.enabledChannels()==enabled);
+      for (int ch=0;ch<3;++ch)
+        assert(selected.status().channels[ch].connected==enabled[ch]);
+      assert(selected.disconnect());
+    } else assert(!configured);
+  }
   assert(loaded.value.channels[0].rods.size() == 14);
   assert(loaded.value.channels[1].rods.size() == 14);
   assert(loaded.value.channels[2].rods.size() == 12);
+  {
+    auto single=loaded.value;
+    for (int ch=1;ch<3;++ch) {
+      single.channels[ch].rods.clear();
+      single.channels[ch].layerMembers.clear();
+      single.channels[ch].clearanceRules.clear();
+    }
+    const auto path=(std::filesystem::temp_directory_path()/"ff_single_channel_config.json").string();
+    assert(FFConfigIO::save(path,single));
+    auto restored=FFConfigIO::load(path);
+    assert(restored && restored.value.channels[0].rods.size()==14 &&
+           restored.value.channels[1].rods.empty());
+    FFApplicationService selected;
+    assert(selected.loadConfig(path,true,{"","",""},std::array<bool,3>{true,false,false}));
+    assert(selected.connect());
+    assert(selected.disconnect());
+    assert(!selected.loadConfig(path,true,{"","",""},std::array<bool,3>{true,true,true}));
+    std::filesystem::remove(path);
+  }
+  {
+    auto partial=loaded.value;
+    partial.channels[1].layerMembers={{0,2,3,-1,1}};
+    const auto path=(std::filesystem::temp_directory_path()/"ff_partial_disabled_topology.json").string();
+    assert(FFConfigIO::save(path,partial));
+    assert(FFConfigIO::load(path));
+    FFApplicationService ch1;
+    assert(ch1.loadConfig(path,true,{"","",""},std::array<bool,3>{true,false,false}));
+    FFApplicationService ch2;
+    auto selected=ch2.loadConfig(path,true,{"","",""},std::array<bool,3>{false,true,false});
+    assert(!selected);
+    assert(selected.message.find("CH2 Rod 1")!=std::string::npos);
+    std::filesystem::remove(path);
+  }
   assert(loaded.value.channels[0].trainingRod == RodId{12});
   assert(!loaded.value.channels[1].trainingRod);
   assert(!loaded.value.channels[2].trainingRod);
@@ -116,23 +190,29 @@ int main() {
   assert(sharedMotionText.find("\"speed_limit_raw\"") ==
          sharedMotionText.rfind("\"speed_limit_raw\""));
   assert(FFConfigIO::load(sharedMotionPath.string()));
+  auto quotedConfig=loaded.value;
+  quotedConfig.machineId="FF-\"quoted\"";
+  quotedConfig.channels[0].rods[0].name="Rod\\test";
+  assert(FFConfigIO::save(sharedMotionPath.string(),quotedConfig));
+  auto quotedReloaded=FFConfigIO::load(sharedMotionPath.string());
+  assert(quotedReloaded && quotedReloaded.value.machineId==quotedConfig.machineId &&
+         quotedReloaded.value.channels[0].rods[0].name==quotedConfig.channels[0].rods[0].name);
   std::filesystem::remove(sharedMotionPath);
   auto mixedMotion = loaded.value;
   mixedMotion.channels[0].rods[0].maxVelocity = 28;
   const auto mixedMotionPath =
       std::filesystem::temp_directory_path() / "ff_mixed_motion.json";
-  assert(FFConfigIO::save(mixedMotionPath.string(), mixedMotion));
-  auto reloadedMixedMotion = FFConfigIO::load(mixedMotionPath.string());
-  assert(reloadedMixedMotion);
-  assert(reloadedMixedMotion.value.channels[0].rods[0].maxVelocity == 28);
-  assert(reloadedMixedMotion.value.channels[0].rods[1].maxVelocity == 1023);
-  std::filesystem::remove(mixedMotionPath);
+  assert(!FFConfigIO::save(mixedMotionPath.string(), mixedMotion));
   auto invalidMotor = loaded.value;
   invalidMotor.channels[0].rods[0].maxAcceleration = 256;
   assert(!FFConfigIO::validate(invalidMotor));
   invalidMotor = loaded.value;
   invalidMotor.channels[0].rods[0].hardMax = 4096;
   assert(!FFConfigIO::validate(invalidMotor));
+  invalidMotor = loaded.value;
+  invalidMotor.channels[0].rods[0].p1 = 0;
+  auto calibrationError=FFConfigIO::validate(invalidMotor);
+  assert(!calibrationError && calibrationError.message.find("CH1 Rod 0 P1")!=std::string::npos);
   auto c = cfg();
   {
     PositionFileData positions{"test","v1","three \"channels\"",{
@@ -142,7 +222,7 @@ int main() {
     assert(PositionFiles::save(path,positions));
     std::ifstream input(path);
     const std::string written((std::istreambuf_iterator<char>(input)),{});
-    assert(written.find("\"schema\": \"FF-POS-1\"")!=std::string::npos);
+    assert(written.find("\"schema\": \"FF-POS-2\"")!=std::string::npos);
     assert(written.find("\"samples\"")==std::string::npos);
     assert(written.find("\"velocity\"")==std::string::npos);
     assert(written.find("{\"rod\": 0, \"position\": 20},\n"
@@ -156,6 +236,16 @@ int main() {
     std::filesystem::remove(path);
   }
   {
+    const auto path=(std::filesystem::temp_directory_path()/"ff_sparse_position.json").string();
+    PositionFileData positions{"test","v1","CH2 only",{{{ChannelId::CH2,0},40}}};
+    assert(PositionFiles::save(path,positions));
+    auto restored=PositionFiles::load(path,c);
+    assert(restored && restored.value.targets.size()==1);
+    assert(!PositionFiles::validate(restored.value,c,1));
+    assert(PositionFiles::validate(restored.value,c,2));
+    std::filesystem::remove(path);
+  }
+  {
     std::array<std::unique_ptr<IControllerBackend>,3> partial;
     partial[0]=std::make_unique<FailingOpenBackend>(false);
     partial[1]=std::make_unique<FailingOpenBackend>(true);
@@ -165,6 +255,26 @@ int main() {
     assert(!failedOpen.connect());
     assert(!failedOpen.channel(ChannelId::CH1)->controller().isConnected());
     assert(!failedOpen.channel(ChannelId::CH3)->controller().isConnected());
+  }
+  for (int bits=1;bits<8;++bits) {
+    std::array<bool,3> enabled{bool(bits&1),bool(bits&2),bool(bits&4)};
+    std::array<std::shared_ptr<ProbeState>,3> probes;
+    std::array<std::unique_ptr<IControllerBackend>,3> backends;
+    for (int ch=0;ch<3;++ch) {
+      probes[ch]=std::make_shared<ProbeState>();
+      backends[ch]=std::make_unique<ProbeBackend>(probes[ch]);
+    }
+    FF selected(c,std::move(backends),enabled);
+    assert(selected.initialize() && selected.connect());
+    MotionRequest request;
+    for (int ch=0;ch<3;++ch) {
+      assert((selected.channel(static_cast<ChannelId>(ch))!=nullptr)==enabled[ch]);
+      if (enabled[ch]) request.targets.push_back({{static_cast<ChannelId>(ch),0},50});
+    }
+    assert(selected.submitMotion(request));
+    for (int ch=0;ch<3;++ch)
+      assert((probes[ch]->commands.load()>0)==enabled[ch]);
+    assert(selected.disconnect());
   }
   assert(FFConfigIO::validate(c));
   auto invalidConfig = c;
@@ -217,7 +327,7 @@ int main() {
   // Match the GUI loading path: Simulation supplies unique runtime ports even
   // if editable JSON defaults are intentionally blank or duplicated.
   FFApplicationService defaultService;
-  assert(defaultService.applyConfig(loaded.value, true, {"", "", ""}, 3));
+  assert(defaultService.applyConfig(loaded.value, true, {"", "", ""}, 1));
   assert(defaultService.connect());
   assert(defaultService.refresh());
   const auto &defaultChannel = loaded.value.channels[0];
@@ -260,6 +370,19 @@ int main() {
       {0, 4, 1, -1, 1}, {1, 4, 2, 0, -1}, {0, 9, 1, -1, 1}, {1, 9, 2, 0, -1}};
   layered.channels[0].clearanceRules.push_back({4, 0, 1, 5.0});
   layered.channels[0].clearanceRules.push_back({9, 0, 1, 5.0});
+  {
+    auto missingRule=layered;
+    missingRule.channels[0].clearanceRules.pop_back();
+    FFApplicationService rejected;
+    auto opened=rejected.applyConfig(missingRule,true,{"","",""},1);
+    assert(!opened && opened.message.find("CH1")!=std::string::npos &&
+           opened.message.find("clearance")!=std::string::npos);
+    auto missingTopology=layered;
+    missingTopology.channels[0].layerMembers.erase(
+        missingTopology.channels[0].layerMembers.begin()+1);
+    opened=rejected.applyConfig(missingTopology,true,{"","",""},1);
+    assert(!opened && opened.message.find("CH1")!=std::string::npos);
+  }
   auto layeredStatus = s;
   layeredStatus.safety[0].state = SafetyState::Safe;
   layeredStatus.channels[0].rods.push_back(layeredStatus.channels[0].rods[0]);
@@ -275,11 +398,11 @@ int main() {
       layered, layeredStatus,
       {{{{ChannelId::CH1, 0}, 50}, {{ChannelId::CH1, 1}, 85}}, false});
   assert(groupedPlan && groupedPlan.value.steps.size() == 2);
-  static_assert(FF_MOTION_SPEED == 1023);
   auto groupedConfig = cfg();
   auto groupedRod = groupedConfig.channels[0].rods[0];
   groupedRod.id = 1;
   groupedConfig.channels[0].rods.push_back(groupedRod);
+  groupedConfig.channels[0].layerMembers.push_back({1,3,3,-1,-1});
   groupedConfig.maxActiveRodCount = 4;
   FFApplicationService groupedService;
   assert(groupedService.applyConfig(groupedConfig, true, {"", "", ""}));
@@ -428,14 +551,15 @@ int main() {
   assert(!service.applyConfig(c, true, {"", "", ""}));
   assert(service.disconnect());
   auto slowConfig=cfg();
-  slowConfig.channels[0].rods[0].stableTime=std::chrono::milliseconds(2000);
-  slowConfig.channels[0].rods[0].moveTimeout=std::chrono::milliseconds(80);
-  assert(service.applyConfig(slowConfig,true,{"","",""}));
-  assert(service.connect());
-  auto timed=service.moveRodAndWait({{ChannelId::CH1,0},60});
-  assert(!timed && timed.error==ErrorCode::Timeout);
-  assert(service.disconnect());
-  slowConfig.channels[0].rods[0].moveTimeout=std::chrono::milliseconds(5000);
+  for (auto& channel:slowConfig.channels)
+    for (auto& rod:channel.rods) {
+      rod.stableTime=std::chrono::milliseconds(2000);
+      rod.moveTimeout=std::chrono::milliseconds(80);
+    }
+  assert(!service.applyConfig(slowConfig,true,{"","",""}));
+  for (auto& channel:slowConfig.channels)
+    for (auto& rod:channel.rods)
+      rod.moveTimeout=std::chrono::milliseconds(5000);
   assert(service.applyConfig(slowConfig,true,{"","",""}));
   assert(service.connect());
   Result<void> interrupted;
@@ -586,16 +710,50 @@ int main() {
   std::ifstream writtenArchive(archivePath);
   const std::string archiveJson((std::istreambuf_iterator<char>(writtenArchive)),{});
   writtenArchive.close();
-  assert(archiveJson.find("\"schema\": \"FF-TRAIN-2\"")!=std::string::npos);
+  assert(archiveJson.find("\"schema\": \"FF-TRAIN-3\"")!=std::string::npos);
   assert(archiveJson.find("\"position_mm\": 23.401")!=std::string::npos);
   assert(archiveJson.find("23.401245")==std::string::npos);
   assert(archiveJson.find("0.10000000000000001")==std::string::npos);
-  assert(archiveJson.find("\"channel\": 2, \"training\": {}")!=std::string::npos);
+  assert(archiveJson.find("\"channel\": 2, \"training\": {}") == std::string::npos);
   auto restoredArchive=TrainingAnalysis::loadArchive(archivePath);
   assert(restoredArchive && restoredArchive.value.channels[0] &&
          restoredArchive.value.channels[1] && !restoredArchive.value.channels[2]);
   assert(restoredArchive.value.channels[0]->samples[0].positionMm==23.401);
   assert(restoredArchive.value.channels[1]->executionTargets[1].position==55);
+  auto oldMultiJson=archiveJson;
+  const auto schemaName=oldMultiJson.find("FF-TRAIN-3");
+  assert(schemaName!=std::string::npos);
+  oldMultiJson.replace(schemaName,std::string("FF-TRAIN-3").size(),"FF-TRAIN-2");
+  const auto finalChannelsEnd=oldMultiJson.rfind("\n  ]");
+  assert(finalChannelsEnd!=std::string::npos);
+  oldMultiJson.insert(finalChannelsEnd,",\n    {\"channel\": 2, \"training\": {}}");
+  const auto oldMultiPath=archivePath+".v2.json";
+  std::ofstream(oldMultiPath,std::ios::binary)<<oldMultiJson;
+  auto oldMulti=TrainingAnalysis::loadArchive(oldMultiPath);
+  assert(oldMulti && oldMulti.value.channels[0] && oldMulti.value.channels[1] &&
+         !oldMulti.value.channels[2] && oldMulti.value.channels[0]->samples.size()==session.samples.size());
+  auto partialArchive=archive;
+  partialArchive.sampleCount=300;
+  partialArchive.enabledChannels={true,true,false};
+  for (int ch=0;ch<2;++ch) {
+    auto& interrupted=*partialArchive.channels[ch];
+    interrupted.sampleCount=300;
+    interrupted.samples.resize(2);
+    interrupted.complete=false;
+    interrupted.aims.clear();
+    interrupted.executionTargets.clear();
+  }
+  const auto partialPath=archivePath+".partial.json";
+  assert(TrainingAnalysis::saveArchive(partialPath,partialArchive));
+  auto restoredPartial=TrainingAnalysis::loadArchive(partialPath);
+  assert(restoredPartial && restoredPartial.value.sampleCount==300 &&
+         restoredPartial.value.enabledChannels==partialArchive.enabledChannels &&
+         restoredPartial.value.channels[0]->samples.size()==2 &&
+         restoredPartial.value.channels[1]->samples.size()==2 &&
+         !restoredPartial.value.channels[0]->complete &&
+         !restoredPartial.value.channels[1]->complete &&
+         restoredPartial.value.channels[0]->executionTargets.empty() &&
+         restoredPartial.value.channels[1]->executionTargets.empty());
   auto archivePositions=PositionFiles::load(archivePath,c);
   assert(archivePositions && archivePositions.value.targets.size()==4);
   auto oldArchive=TrainingAnalysis::loadArchive(legacySessionPath);
@@ -605,6 +763,8 @@ int main() {
   tooSmallStep.stepMm=0.0001;
   assert(!TrainingAnalysis::saveSession(archivePath+".invalid",tooSmallStep));
   std::filesystem::remove(archivePath);
+  std::filesystem::remove(oldMultiPath);
+  std::filesystem::remove(partialPath);
   std::filesystem::remove(sessionPath);
   std::filesystem::remove(legacySessionPath);
   std::cout << "FF tests passed\n";

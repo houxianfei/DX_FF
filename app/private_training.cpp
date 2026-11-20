@@ -1,6 +1,28 @@
 #include "gui_driver.hpp"
+#include <cmath>
+#include <limits>
 
 namespace ff {
+Result<RodTarget> GuiTrainingAnalysis::scanTarget(
+    const TrainingSession& session,const RodConfig& rod,int sampleIndex,int sampleCount) {
+  if (sampleCount<2 || sampleCount>100000 || sampleIndex<0 ||
+      sampleIndex>=sampleCount || session.trainingRod!=rod.id ||
+      !std::isfinite(session.startMm) || !std::isfinite(session.endMm) ||
+      session.startMm==session.endMm || !std::isfinite(rod.p0) ||
+      !std::isfinite(rod.p1) || std::abs(rod.p1)<1e-12)
+    return Result<RodTarget>::failure(ErrorCode::InvalidConfiguration,
+        "Invalid training sample settings");
+  const double mm=session.startMm+(session.endMm-session.startMm)*
+      sampleIndex/(sampleCount-1);
+  const double encoder=(mm-rod.p0)/rod.p1;
+  if (!std::isfinite(encoder) ||
+      encoder<std::numeric_limits<std::int32_t>::min() ||
+      encoder>std::numeric_limits<std::int32_t>::max())
+    return Result<RodTarget>::failure(ErrorCode::InvalidTarget,
+        "Training sample encoder is out of range");
+  return Result<RodTarget>::success({{session.channel,rod.id},
+      static_cast<std::int32_t>(std::lround(encoder))});
+}
 namespace {
 std::vector<::FF::Sample> samples(const std::vector<TrainingSample>& input) {
   std::vector<::FF::Sample> result;
@@ -15,6 +37,7 @@ TrainingSession fromPublic(const ::FF::TrainingSession& s) {
   out.source=static_cast<TrainingSource>(s.source);
   out.channel=static_cast<ChannelId>(s.channel); out.trainingRod=static_cast<RodId>(s.trainingRod);
   out.startMm=s.startMm; out.endMm=s.endMm; out.stepMm=s.stepMm;
+  out.sampleCount=s.sampleCount;
   out.valleySettings={s.valleySettings.smoothingPoints,s.valleySettings.minimumProminenceFraction,
     s.valleySettings.minimumDistanceMm,s.valleySettings.maximumCount};
   for (auto v:s.samples) out.samples.push_back({v.positionMm,v.energy});
@@ -36,6 +59,7 @@ TrainingSession fromPublic(const ::FF::TrainingSession& s) {
   out.source=static_cast<::FF::TrainingSource>(s.source);
   out.channel=static_cast<int>(s.channel); out.trainingRod=s.trainingRod;
   out.startMm=s.startMm; out.endMm=s.endMm; out.stepMm=s.stepMm;
+  out.sampleCount=s.sampleCount;
   out.valleySettings=settings(s.valleySettings);
   for (auto v:s.samples) out.samples.push_back({v.positionMm,v.energy});
   out.candidatesMm=s.candidatesMm;
@@ -100,6 +124,8 @@ Result<void> GuiTrainingAnalysis::saveArchive(GuiDriver& driver,const std::strin
   value.configVersion=archive.configVersion;
   value.createdUnixSeconds=archive.createdUnixSeconds;
   value.selectedChannel=archive.selectedChannel;
+  value.enabledChannels=archive.enabledChannels;
+  value.sampleCount=archive.sampleCount;
   for (int ch=0;ch<3;++ch)
     if (archive.channels[ch]) value.channels[ch]=toPublic(*archive.channels[ch]);
   return privateResult(driver.sdk().save_training_archive(path,value));
@@ -114,6 +140,8 @@ Result<GuiTrainingArchive> GuiTrainingAnalysis::loadArchive(GuiDriver& driver,
   out.configVersion=loaded.value.configVersion;
   out.createdUnixSeconds=loaded.value.createdUnixSeconds;
   out.selectedChannel=loaded.value.selectedChannel;
+  out.enabledChannels=loaded.value.enabledChannels;
+  out.sampleCount=loaded.value.sampleCount;
   for (int ch=0;ch<3;++ch)
     if (loaded.value.channels[ch]) out.channels[ch]=fromPublic(*loaded.value.channels[ch]);
   return Result<GuiTrainingArchive>::success(std::move(out));

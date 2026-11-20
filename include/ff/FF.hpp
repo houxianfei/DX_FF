@@ -11,7 +11,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "DX_FF_MotionPolicy.h"
 
 #if defined(FF_APPLICATION_EXPORTS)
 #define FF_SDK_API __declspec(dllexport)
@@ -22,8 +21,6 @@
 #endif
 
 namespace ff {
-
-inline constexpr int kMotionSpeed = FF_MOTION_SPEED;
 
 // Optical-position resolution used when comparing layer-clearance boundaries.
 // A measured gap may be this much smaller than the configured minimum without
@@ -395,7 +392,8 @@ private:
 class FF {
 public:
   explicit FF(FFConfig config,
-              std::array<std::unique_ptr<IControllerBackend>, 3> backends);
+              std::array<std::unique_ptr<IControllerBackend>, 3> backends,
+              std::array<bool, 3> enabled = {true,true,true});
   ~FF();
   FF(const FF &) = delete;
   FF &operator=(const FF &) = delete;
@@ -432,6 +430,7 @@ public:
 
 private:
   FFConfig config_{};
+  std::array<bool, 3> enabled_{};
   std::array<std::unique_ptr<FFChannel>, 3> channels_{};
   mutable std::mutex mutex_;
   FFState state_{FFState::Offline};
@@ -448,6 +447,9 @@ public:
   Result<void> loadConfig(const std::string &fileName, bool simulation,
                           const std::array<std::string, 3> &serialPorts,
                           int activeChannelCount = 3);
+  Result<void> loadConfig(const std::string &fileName, bool simulation,
+                          const std::array<std::string, 3> &serialPorts,
+                          std::array<bool, 3> enabled);
   // Replaces the disconnected runtime instance with a validated configuration.
   // Runtime serial-port choices are applied in exactly the same way as loadConfig.
   Result<void> applyConfig(const FFConfig &config, bool simulation,
@@ -480,6 +482,7 @@ public:
   bool connected() const noexcept;
   bool simulation() const noexcept;
   int activeChannelCount() const noexcept;
+  std::array<bool, 3> enabledChannels() const noexcept;
   std::string lastError() const;
   void setStatusCallback(StatusCallback);
 
@@ -488,7 +491,7 @@ private:
   Result<void> executeGroup(const std::vector<RodTarget> &);
   Result<void> replaceMachine(FFConfig config, bool simulation,
                               const std::array<std::string, 3> &serialPorts,
-                              int activeChannelCount);
+                              std::array<bool, 3> enabled);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

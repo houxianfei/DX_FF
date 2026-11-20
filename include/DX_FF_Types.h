@@ -59,6 +59,7 @@ struct RodPosition {
 struct PositionSet {
   std::vector<Target> targets;
   std::string summary;
+  std::vector<int> ignoredChannels;
 };
 
 // Hardware feedback target is distinct from the latest submitted target.
@@ -79,7 +80,9 @@ struct ChannelStatus {
 struct DeviceStatus {
   std::string state; // Offline, Ready, Moving, Fault, EmergencyStopped or Other.
   std::array<ChannelStatus, 3> channels{};
+  bool initialized{false};
 };
+using ChannelSelection = std::array<bool, 3>;
 
 struct ConfigSnapshot {
   std::string machineId, configVersion, json;
@@ -115,6 +118,7 @@ struct ChannelInfo {
 struct MachineInfo {
   std::array<ChannelInfo, 3> channels{};
   int activeChannels{0};
+  ChannelSelection enabledChannels{};
 };
 
 struct Sample {
@@ -158,6 +162,7 @@ struct TrainingSession {
   TrainingSource source{TrainingSource::Sim1};
   int channel{0}, trainingRod{0};
   double startMm{0}, endMm{0}, stepMm{0.1};
+  int sampleCount{300};
   ValleySettings valleySettings{};
   std::vector<Sample> samples;
   std::vector<double> candidatesMm;
@@ -174,6 +179,8 @@ struct TrainingArchive {
   std::string machineId, configVersion;
   std::int64_t createdUnixSeconds{0};
   int selectedChannel{0};
+  ChannelSelection enabledChannels{};
+  int sampleCount{300};
   std::array<std::optional<TrainingSession>,3> channels{};
 };
 

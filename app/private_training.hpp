@@ -54,6 +54,7 @@ struct TrainingSession {
   ChannelId channel{ChannelId::CH1};
   RodId trainingRod{0};
   double startMm{0.0}, endMm{0.0}, stepMm{0.1};
+  int sampleCount{300};
   ValleyDetectionSettings valleySettings{};
   std::vector<TrainingSample> samples;
   std::vector<double> candidatesMm;
@@ -75,11 +76,15 @@ struct GuiTrainingArchive {
   std::string machineId, configVersion;
   std::int64_t createdUnixSeconds{0};
   int selectedChannel{0};
+  std::array<bool,3> enabledChannels{};
+  int sampleCount{300};
   std::array<std::optional<TrainingSession>,3> channels{};
 };
 
 class GuiTrainingAnalysis {
 public:
+  static Result<RodTarget> scanTarget(const TrainingSession&, const RodConfig&,
+                                      int sampleIndex, int sampleCount);
   static std::uint64_t simulatedEnergy(GuiDriver&, TrainingSource source, double positionMm,
                                         double startMm, double endMm);
   static double interpolateEnergy(GuiDriver&, const std::vector<TrainingSample> &samples,

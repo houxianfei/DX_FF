@@ -86,16 +86,18 @@ bool objectsField(const std::string& text,const std::string& key,
 Result<PositionFileData> loadPositionJson(const std::string& text) {
   PositionFileData file;
   std::string schema;
-  if (!stringField(text,"schema",schema) || schema!="FF-POS-1" ||
+  if (!stringField(text,"schema",schema) ||
+      (schema!="FF-POS-1" && schema!="FF-POS-2") ||
       !stringField(text,"machine_id",file.machineId) ||
       !stringField(text,"config_version",file.configVersion) ||
       !stringField(text,"summary",file.summary))
     return Result<PositionFileData>::failure(ErrorCode::InvalidConfiguration,
                                               "Invalid position file header");
   std::vector<std::string> channels;
-  if (!objectsField(text,"channels",channels) || channels.size()!=3)
+  if (!objectsField(text,"channels",channels) ||
+      (schema=="FF-POS-1" ? channels.size()!=3 : channels.empty() || channels.size()>3))
     return Result<PositionFileData>::failure(ErrorCode::InvalidConfiguration,
-                                              "Position file must list CH1, CH2 and CH3");
+                                              "Invalid position channel list");
   std::set<int> seenChannels;
   for (const auto& channel:channels) {
     long long id{};
@@ -152,9 +154,9 @@ Result<PositionFileData> PositionFiles::load(const std::string& path,const FFCon
                                                           "Cannot read position file");
     const std::string text((std::istreambuf_iterator<char>(input)),{});
     std::string schema;
-    if (stringField(text,"schema",schema) && schema=="FF-POS-1")
+    if (stringField(text,"schema",schema) && (schema=="FF-POS-1" || schema=="FF-POS-2"))
       return loadPositionJson(text);
-    if (schema=="FF-TRAIN-2") {
+    if (schema=="FF-TRAIN-2" || schema=="FF-TRAIN-3") {
       auto archive=TrainingAnalysis::loadArchive(path);
       if (!archive) return Result<PositionFileData>::failure(archive.error,archive.message);
       file.machineId=archive.value.machineId;
@@ -185,19 +187,18 @@ Result<void> PositionFiles::save(const std::string& path,const PositionFileData&
     std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
     if (!out) return Result<void>::failure(ErrorCode::BackendFailure,
                                            "Cannot write position file");
-    out << "{\n  \"schema\": \"FF-POS-1\",\n"
+    out << "{\n  \"schema\": \"FF-POS-2\",\n"
         << "  \"machine_id\": \"" << escapeJson(file.machineId) << "\",\n"
         << "  \"config_version\": \"" << escapeJson(file.configVersion) << "\",\n"
         << "  \"summary\": \"" << escapeJson(file.summary) << "\",\n"
         << "  \"channels\": [\n";
+    bool firstChannel=true;
     for (int ch=0;ch<3;++ch) {
       const bool hasTargets=std::any_of(file.targets.begin(),file.targets.end(),
         [ch](const auto& target){return static_cast<int>(target.address.channel)==ch;});
-      if (!hasTargets) {
-        out << "    {\"channel\": " << ch << ", \"execution_targets\": []}"
-            << (ch<2?",":"") << '\n';
-        continue;
-      }
+      if (!hasTargets) continue;
+      if (!firstChannel) out << ",\n";
+      firstChannel=false;
       out << "    {\"channel\": " << ch << ", \"execution_targets\": [\n";
       bool first=true;
       for (const auto& target:file.targets) {
@@ -208,9 +209,9 @@ Result<void> PositionFiles::save(const std::string& path,const PositionFileData&
         first=false;
       }
       if (!first) out << '\n';
-      out << "    ]}" << (ch<2?",":"") << '\n';
+      out << "    ]}";
     }
-    out << "  ]\n}\n";
+    out << "\n  ]\n}\n";
     out.flush();
     if (!out) { out.close(); std::remove(temporary.c_str());
       return Result<void>::failure(ErrorCode::BackendFailure,
@@ -224,33 +225,50 @@ Result<void> PositionFiles::save(const std::string& path,const PositionFileData&
   return Result<void>::success();
 }
 Result<void> PositionFiles::validate(const PositionFileData& file,const FFConfig& current,int count) {
+  std::array<bool,3> enabled{};
+  if (count<1 || count>3) return Result<void>::failure(ErrorCode::InvalidConfiguration,"Invalid channel count");
+  for (int ch=0;ch<count;++ch) enabled[ch]=true;
+  return validate(file,current,enabled);
+}
+Result<void> PositionFiles::validate(const PositionFileData& file,const FFConfig& current,
+                                     std::array<bool,3> enabled) {
   if(file.machineId!=current.machineId || file.configVersion!=current.configVersion)
     return Result<void>::failure(ErrorCode::InvalidConfiguration,"Machine or configuration version mismatch");
   if(file.targets.empty()) return Result<void>::failure(ErrorCode::InvalidTarget,"No position targets");
   std::array<std::set<int>,3> seen; std::array<bool,3> used{};
   for(const auto& target:file.targets) {
     const int ch=static_cast<int>(target.address.channel);
-    if(ch<0 || ch>=count ||
+    if(ch<0 || ch>=3 ||
        !seen[ch].insert(target.address.rod).second)
       return Result<void>::failure(ErrorCode::InvalidTarget,"Invalid or duplicate target");
     used[ch]=true;
   }
-  for(int ch=0;ch<count;++ch) {
+  bool applicable=false;
+  for(int ch=0;ch<3;++ch) {
+    if (!enabled[ch]) continue;
+    if (seen[ch].empty()) continue;
+    applicable=true;
     if(seen[ch].size()!=current.channels[ch].rods.size())
       return Result<void>::failure(ErrorCode::InvalidTarget,"Incomplete channel target set");
     for(const auto& rod:current.channels[ch].rods) if(!seen[ch].count(rod.id))
       return Result<void>::failure(ErrorCode::InvalidTarget,"Incomplete channel target set");
   }
+  if (!applicable)
+    return Result<void>::failure(ErrorCode::InvalidTarget,"No target for an enabled channel");
   return Result<void>::success();
 }
 Result<void> PositionFiles::execute(FFApplicationService& service,const PositionFileData& file,
                                     bool waitForStable) {
   auto config=service.config();
   if(!config) return Result<void>::failure(ErrorCode::NotReady);
-  auto valid=validate(file,*config,service.activeChannelCount()); if(!valid) return valid;
-  valid=service.validateRodTargets(file.targets); if(!valid) return valid;
-  if(!waitForStable) return service.setRodTargets(file.targets);
-  auto plan=service.previewPlan({file.targets,false});
+  auto valid=validate(file,*config,service.enabledChannels()); if(!valid) return valid;
+  std::vector<RodTarget> applicable;
+  for (const auto& target:file.targets)
+    if (service.enabledChannels()[static_cast<int>(target.address.channel)])
+      applicable.push_back(target);
+  valid=service.validateRodTargets(applicable); if(!valid) return valid;
+  if(!waitForStable) return service.setRodTargets(applicable);
+  auto plan=service.previewPlan({applicable,false});
   if(!plan) return Result<void>::failure(plan.error,plan.message);
   return service.executePlan(plan.value);
 }

@@ -1,26 +1,30 @@
 # FF 应用层 SDK 1.0.1 版本记录
 
-**状态：未正式发布。** FF GUI 与应用层 SDK 的当前本地版本均为 `1.0.1`。此前开发构建使用过的版本号不作为正式发布历史，也不提供跨开发构建的 ABI 兼容承诺。
+**状态：本地交付构建，尚未正式对外发布。** GUI 与 SDK 当前均为 1.0.1，各自独立标识；不承诺与早期开发构建的 ABI 兼容。
 
 ## 交付内容
 
-- `DX_FF.h` 对象接口、`DX_FF_Types.h` 数据结构与 `DX_FF_MotionPolicy.h` 固定运动速度宏。
-- Windows x64 / Visual Studio 2019 v142 / C++17 的 `ff_application.lib` 和 `ff_application.dll`。
-- MightyZap 运行时 DLL、配置样例、接口文档与独立 SDK 示例。
+- FF_SDK_v1.0.1.zip，解压目录同名；Windows x64 / VS2019 v142 / C++17。
+- 两个公开头文件 DX_FF.h、DX_FF_Types.h，导入库 ff_application.lib，ff_application.dll 及 MightyZap 运行时 DLL。
+- Visual C++ x64 运行库安装程序、完整对外文档、配置/仿真样例、C++ 示例和 Python 配置转换工具。
+- SDK 版本、VERSION 文件、压缩包名称共用内部版本定义；GUI 编译仅更新本地暂存目录。
 
-本地开发构建的运动接口已移除逐次输入的速度参数，目标及位置文件也不再写速度。`FF_MOTION_SPEED` 默认为底层原始速度最大值 `1023`，MightyZap 在连接初始化时设置一次；旧位置文件的速度字段读取时忽略。此变更需重新编译 SDK 消费方。
+## 当前接口与行为
 
-公开运动入口收敛为阻塞的 `move_rod()`、`move_rods()` 和非阻塞的 `send_rod()`、`send_rods()`。多杆方法直接接收每根启用杆恰好一个目标，安全校验在 SDK 内进行。`load_positions()` 改为返回 `ValueResult<PositionSet>`，其中包含目标数组和摘要，不保留待执行目标。公开的初始化、目标缓存设置与校验、规划及旧执行方法和计划类型已移除；已有 SDK 消费方须按新头文件修改调用并重新编译。
+连接后通过 initialize(slot0) 运动到初始杆位；slot0 覆盖全部启用电机。支持任意非空物理通道组合。停止、急停、复位和断开会清除初始化标志。
 
-位置文件现用独立的 `FF-POS-1` 格式，固定列出三个通道，各杆目标分行；不再写入 Training session 的扫描字段。新增 `save_positions()` 用于保存指定完整目标集，GUI 预设也通过该入口写入。旧 `FF-TRAIN-1` 位置文件仍可读取。
+阻塞 move_rod/move_rods 等待到位稳定；非阻塞 send_rod/send_rods/send_partial_rods 仅表示下发。完整多杆方法要求全部启用杆目标，partial 方法仅向列出的杆发送。validate_rods 只校验不运动。
 
-Training 新增三通道归档 `FF-TRAIN-2` 和公开的保存、读取接口。GUI 会一起保存三个通道的训练缓存；数组逐项分行，浮点字段最多三位小数。旧单通道接口仍可使用，旧文件仍可读取；新增的公开类型与接口要求 SDK 调用方重新编译。
+速度由 motor_parameters.speed_limit_raw 配置，连接时逐杆设置；目标不包含速度。旧固定速度宏及独立运动策略头文件已删除。
 
-## 发布前验证
+位置文件新写 FF-POS-2，允许普通配方缺少整个通道；load_positions 返回适用目标和摘要，不运动。多通道训练新写 FF-TRAIN-3，包含启用通道和采样数；旧格式继续可读。
+
+Training 分配结果须包含候选及避让目标。stage/TDI 接口以外部适配伪代码说明，真实采集未接入 GUI；仿真不代表硬件或光学验收。
+
+## 发布验证
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package_ff_sdk.ps1 -Configuration Release
-.\x64\Release\ff_tests.exe
 ```
 
-真实硬件上线前仍需独立完成机械限位、速度、互锁和安全边界验证；Simulation 只验证软件流程。
+发布后从 ZIP 解压目录编译和运行示例，核对 version() 与 VERSION、包名一致。真实投运前独立完成限位、速度、机械包络和互锁验证。

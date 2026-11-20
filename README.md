@@ -8,7 +8,6 @@ FF 是一套包含 3 个 Channel 和多根 MightyZap 遮挡棒的整机控制、
 | --- | --- |
 | `include/DX_FF.h` | SDK 对象入口头文件；自动包含 `DX_FF_Types.h` |
 | `include/DX_FF_Types.h` | SDK 公开数据结构、结果码与状态定义 |
-| `include/DX_FF_MotionPolicy.h` | SDK 固定运动速度宏，修改后需重新构建 SDK |
 | `include/ff/` | SDK DLL 内部实现头文件，不随 SDK 交付 |
 | `app/` | GUI 入口、按职责拆分的界面实现，以及显式接收驱动实例的 SDK 适配层 |
 | `src/core/` | 核心控制、训练、配置与 SDK 适配实现 |
@@ -53,17 +52,19 @@ powershell -ExecutionPolicy Bypass -File tools/package_ff_gui_app.ps1 -Configura
 powershell -ExecutionPolicy Bypass -File tools/build_ff_gui_installer.ps1 -Configuration Release -SkipPackage
 ```
 
-安装包输出为 `publish/installer/FF_GUI_Setup_v1.0.1.exe`。程序默认使用 Simulation 模式；配置、日志和运行数据位于 `%PROGRAMDATA%\RSIC\FF`。
+安装包输出为 `publish/installer/FF_GUI_Setup_v1.0.1.exe`。构建脚本校验 GUI、SDK 和安装包的版本号一致。程序默认使用 Simulation 模式；配置、位置文件、训练会话和运行数据位于 `%PROGRAMDATA%\RSIC\FF`。覆盖安装和卸载会保留该目录中的用户数据；安装目录中的 CSV 配置模板已有文件也不会被覆盖。首次安装仅在 `ff_config.json` 不存在时复制默认配置。
 
 ## SDK 发布
 
-SDK 发布包面向 Windows x64 / VS2019 v142 / C++17 集成。它包含对象入口 `DX_FF.h`、数据结构 `DX_FF_Types.h` 和运动策略 `DX_FF_MotionPolicy.h`，以及 DLL、导入库、MightyZap 运行时依赖、配置样例和中文接口文档。集成方仍只需包含 `<DX_FF.h>`。GUI 构建会先生成匹配配置的 SDK。单独构建 SDK：
+按应用任务集成时，先阅读[应用场景指南](docs/public_sdk/应用场景指南.md)。FF、stage 和 TDI 联动的完整训练步骤见[Training 流程](docs/public_sdk/Training计算流程.md)，可编译的纯 FF 闭环见[仿真示例](docs/public_sdk/仿真示例.md)。stage/TDI 接口当前使用明确标注的外部适配伪代码，真实采集尚未接入 GUI。
+
+SDK 发布包面向 Windows x64 / VS2019 v142 / C++17 集成。它包含对象入口 `DX_FF.h`、数据结构 `DX_FF_Types.h` ，以及 DLL、导入库、MightyZap 运行时依赖、配置样例和中文接口文档。集成方仍只需包含 `<DX_FF.h>`。GUI 构建会先生成匹配配置的 SDK。单独构建 SDK：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package_ff_sdk.ps1 -Configuration Release
 ```
 
-输出目录为 `FF_SDK/`；入口文档是 `FF_SDK/README.md`，其余应用层文档见 `FF_SDK/docs/`。SDK 版本与 GUI 版本独立标识。
+对外交付压缩包为 `publish/sdk/FF_SDK_v1.0.1.zip`，解压得到同名目录，包含头文件、导入库、依赖 DLL、Visual C++ x64 运行库安装程序、完整对外文档、配置和示例。`FF_SDK/` 保留为本地 GUI 编译暂存目录。SDK 版本由内部 `include/ff/Version.hpp` 统一定义，独立于 GUI 版本；升级后重新执行发布脚本，按版本名生成 ZIP。发布细节见[SDK 包说明](docs/SDK_PACKAGE_README.md)。
 
 > 真实硬件上线前，必须在目标机完成限位、零位、标定、拓扑、禁区和间隙规则的复核。Simulation 仅用于软件验证，不能证明机械安全性。
 

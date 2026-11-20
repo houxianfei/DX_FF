@@ -12,6 +12,8 @@ public:
   static Result<void> save(const std::string& path, const PositionFileData& file);
   static Result<void> validate(const PositionFileData& file, const FFConfig& current,
                                int activeChannelCount);
+  static Result<void> validate(const PositionFileData& file, const FFConfig& current,
+                               std::array<bool,3> enabled);
   static Result<void> execute(FFApplicationService& service, const PositionFileData& file,
                               bool waitForStable);
 };

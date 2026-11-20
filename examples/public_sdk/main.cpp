@@ -10,10 +10,8 @@ int main(int argc, char** argv) {
   FF::ff_driver driver;
   auto opened = driver.open(argv[1], FF::Mode::Simulation);
   if (!opened) { std::cerr << opened.message << '\n'; return 1; }
-  auto initial = driver.load_positions(argv[2]);
-  if (!initial) { std::cerr << initial.result.message << '\n'; return 1; }
-  auto moved = driver.move_rods(initial.value.targets);
-  if (!moved) { std::cerr << moved.message << '\n'; return 1; }
+  auto initialized = driver.initialize(argv[2]);
+  if (!initialized) { std::cerr << initialized.message << '\n'; return 1; }
   auto recorded = driver.record_positions(argv[3], "SDK example");
   if (!recorded) { std::cerr << recorded.message << '\n'; return 1; }
   auto loaded = driver.load_positions(argv[3]);
@@ -29,5 +27,6 @@ int main(int argc, char** argv) {
   auto valleys = driver.find_valleys(samples,{});
   std::cout << "SDK " << driver.version() << ", state " << driver.m_status.state
             << ", valleys " << valleys.size() << '\n';
-  driver.close();
+  auto closed = driver.close();
+  if (!closed) { std::cerr << closed.message << '\n'; return 1; }
 }

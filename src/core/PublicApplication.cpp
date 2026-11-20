@@ -2,7 +2,9 @@
 #include "ff/FF.hpp"
 #include "ff/Training.hpp"
 #include "ff/PositionFiles.hpp"
+#include "ff/Version.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -47,11 +49,13 @@ std::vector<ff::RodTarget> internal(const std::vector<Target>& targets) {
   for (auto t:targets) out.push_back(internal(t)); return out;
 }
 Result completeTargets(const std::vector<Target>& targets,
-                       const ff::FFConfig& config, int activeChannels) {
+                       const ff::FFConfig& config, ChannelSelection enabled) {
   std::set<std::pair<int,int>> expected;
-  for (int ch=0;ch<activeChannels;++ch)
+  for (int ch=0;ch<3;++ch) {
+    if (!enabled[ch]) continue;
     for (const auto& rod:config.channels[ch].rods)
       expected.insert({ch,rod.id});
+  }
   if (targets.size()!=expected.size())
     return fail(ErrorCode::InvalidTarget,"Complete target set required");
   for (const auto& target:targets) {
@@ -71,6 +75,7 @@ ff::TrainingSession internal(const TrainingSession& session) {
   raw.channel=static_cast<ff::ChannelId>(session.channel);
   raw.trainingRod=static_cast<ff::RodId>(session.trainingRod);
   raw.startMm=session.startMm; raw.endMm=session.endMm; raw.stepMm=session.stepMm;
+  raw.sampleCount=session.sampleCount;
   raw.valleySettings={session.valleySettings.smoothingPoints,
     session.valleySettings.minimumProminenceFraction,
     session.valleySettings.minimumDistanceMm,session.valleySettings.maximumCount};
@@ -93,6 +98,7 @@ TrainingSession external(const ff::TrainingSession& raw) {
   out.source=static_cast<TrainingSource>(raw.source);
   out.channel=static_cast<int>(raw.channel); out.trainingRod=raw.trainingRod;
   out.startMm=raw.startMm; out.endMm=raw.endMm; out.stepMm=raw.stepMm;
+  out.sampleCount=raw.sampleCount;
   out.valleySettings={raw.valleySettings.smoothingPoints,
     raw.valleySettings.minimumProminenceFraction,
     raw.valleySettings.minimumDistanceMm,raw.valleySettings.maximumCount};
@@ -160,6 +166,9 @@ struct ff_driver::Impl {
   std::vector<RodPosition> currentPositions;
   StatusCallback callback;
   bool opened{false};
+  ChannelSelection enabled{true,true,true};
+  std::atomic<bool> initialized{false};
+  std::atomic<std::uint64_t> initializationEpoch{0};
   std::mutex snapshotMutex;
 };
 ff_driver::ff_driver():impl_(std::make_unique<Impl>()),
@@ -171,15 +180,28 @@ ff_driver::~ff_driver()=default;
 void ff_driver::update_status() {
   if (impl_->opened && impl_->config) {
     auto state=external(impl_->service.status(),*impl_->config);
+    if (state.state=="Fault" || state.state=="EmergencyStopped" || state.state=="Offline")
+      impl_->initialized=false;
+    for (int ch=0;ch<3;++ch) {
+      if (!impl_->enabled[ch]) continue;
+      if (!state.channels[ch].connected || !state.channels[ch].safe ||
+          std::any_of(state.channels[ch].rods.begin(),state.channels[ch].rods.end(),
+                      [](const RodStatus& rod){return rod.alarm || !rod.positionValid;})) {
+        impl_->initialized=false;
+        break;
+      }
+    }
     std::lock_guard lock(impl_->snapshotMutex);
     impl_->statusSnapshot=std::move(state);
+    impl_->statusSnapshot.initialized=impl_->initialized;
     update_current_positions();
   }
 }
 void ff_driver::update_current_positions() {
   impl_->currentPositions.clear();
   if (!impl_->opened || !impl_->config) return;
-  for (int ch=0;ch<impl_->service.activeChannelCount();++ch) {
+  for (int ch=0;ch<3;++ch) {
+    if (!impl_->enabled[ch]) continue;
     const auto& rods=impl_->config->channels[ch].rods;
     for (size_t i=0;i<rods.size();++i) {
       const bool present=i<impl_->statusSnapshot.channels[ch].rods.size();
@@ -196,11 +218,21 @@ Result ff_driver::report(Result result) {
 }
 Result ff_driver::open(const std::string& path, Mode mode,
                     const std::array<std::string,3>& ports, int activeChannels) {
+  if (activeChannels<1 || activeChannels>3)
+    return report(fail(ErrorCode::InvalidConfiguration,"Channel count must be 1..3"));
+  ChannelSelection enabled{};
+  for (int ch=0;ch<activeChannels;++ch) enabled[ch]=true;
+  return open(path,mode,ports,enabled);
+}
+Result ff_driver::open(const std::string& path, Mode mode,
+                    const std::array<std::string,3>& ports, ChannelSelection enabled) {
+  if (std::none_of(enabled.begin(),enabled.end(),[](bool value){return value;}))
+    return report(fail(ErrorCode::InvalidConfiguration,"Select at least one channel"));
   if (impl_->opened) return report(fail(ErrorCode::Busy,"Device is already open"));
   std::ifstream input(path,std::ios::binary);
   if (!input) return report(fail(ErrorCode::InvalidConfiguration,"Cannot read configuration"));
   std::string json((std::istreambuf_iterator<char>(input)),{});
-  auto loaded=impl_->service.loadConfig(path,mode==Mode::Simulation,ports,activeChannels);
+  auto loaded=impl_->service.loadConfig(path,mode==Mode::Simulation,ports,enabled);
   if (!loaded) return report(convert(loaded));
   auto connected=impl_->service.connect();
   if (!connected) {
@@ -209,6 +241,8 @@ Result ff_driver::open(const std::string& path, Mode mode,
   impl_->config=impl_->service.config();
   impl_->configSnapshot={impl_->config->machineId,impl_->config->configVersion,std::move(json)};
   impl_->opened=true;
+  impl_->enabled=enabled;
+  impl_->initialized=false;
   impl_->service.setStatusCallback([this](const ff::FFStatus& s) {
     if (impl_->config) {
       std::lock_guard lock(impl_->snapshotMutex);
@@ -221,10 +255,12 @@ Result ff_driver::open(const std::string& path, Mode mode,
   return report({});
 }
 Result ff_driver::close() {
+  ++impl_->initializationEpoch;
   if (!impl_->opened) return report({});
   auto r=impl_->service.disconnect();
   if(!r) return report(convert(r));
   impl_->opened=false; impl_->config.reset();
+  impl_->initialized=false;
   { std::lock_guard lock(impl_->snapshotMutex);
     impl_->configSnapshot={}; impl_->statusSnapshot={};
     impl_->currentPositions.clear();
@@ -232,13 +268,57 @@ Result ff_driver::close() {
   }
   return report(convert(r));
 }
+Result ff_driver::initialize(const std::string& slot0Path) {
+  impl_->initialized=false;
+  const auto epoch=++impl_->initializationEpoch;
+  if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
+  auto loaded=ff::PositionFiles::load(slot0Path,*impl_->config);
+  if (!loaded)
+    return report(convert(ff::Result<void>::failure(loaded.error,loaded.message)));
+  auto complete=completeTargets([&] {
+    std::vector<Target> targets;
+    for (const auto& target:loaded.value.targets)
+      if (impl_->enabled[static_cast<int>(target.address.channel)])
+        targets.push_back(external(target));
+    return targets;
+  }(),*impl_->config,impl_->enabled);
+  if (!complete) return report(complete);
+  auto checked=ff::PositionFiles::validate(loaded.value,*impl_->config,impl_->enabled);
+  if (!checked) return report(convert(checked));
+  auto fresh=refresh();
+  if (!fresh) return fresh;
+  for (int ch=0;ch<3;++ch) {
+    if (!impl_->enabled[ch]) continue;
+    const auto& status=impl_->statusSnapshot.channels[ch];
+    if (!status.connected || !status.safe ||
+        status.rods.size()!=impl_->config->channels[ch].rods.size())
+      return report(fail(ErrorCode::SafetyViolation,"Enabled channel is not ready"));
+    for (const auto& rod:status.rods)
+      if (!rod.positionValid || rod.alarm)
+        return report(fail(ErrorCode::SafetyViolation,"Motor feedback is unavailable or alarmed"));
+  }
+  std::vector<Target> targets;
+  for (const auto& target:loaded.value.targets)
+    if (impl_->enabled[static_cast<int>(target.address.channel)])
+      targets.push_back(external(target));
+  auto moved=move_rods(targets);
+  if (!moved) return moved;
+  if (impl_->initializationEpoch!=epoch)
+    return report(fail(ErrorCode::Busy,"Initialization was cancelled"));
+  impl_->initialized=true;
+  if (impl_->initializationEpoch!=epoch) {
+    impl_->initialized=false;
+    return report(fail(ErrorCode::Busy,"Initialization was cancelled"));
+  }
+  return report({});
+}
 Result ff_driver::refresh() {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
   return report(convert(impl_->service.refresh()));
 }
 Result ff_driver::refresh_rod(Address address) {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  if (!validAddress(address) || address.channel >= impl_->service.activeChannelCount())
+  if (!validAddress(address) || !impl_->enabled[address.channel])
     return report(fail(ErrorCode::InvalidTarget,"Invalid Rod address"));
   return report(convert(impl_->service.refreshRod(internal(Target{address,0}).address)));
 }
@@ -246,6 +326,7 @@ MachineInfo ff_driver::machine_info() const {
   MachineInfo out;
   if (!impl_->config) return out;
   out.activeChannels = impl_->service.activeChannelCount();
+  out.enabledChannels=impl_->enabled;
   for (int ch=0; ch<3; ++ch) {
     const auto& source=impl_->config->channels[ch];
     auto& target=out.channels[ch];
@@ -275,40 +356,35 @@ ValueResult<PositionSet> ff_driver::load_positions(const std::string& path) {
   auto loaded=ff::PositionFiles::load(path,*impl_->config);
   if(!loaded) return {{},report(convert(ff::Result<void>::failure(loaded.error,loaded.message)))};
   auto checked=ff::PositionFiles::validate(loaded.value,*impl_->config,
-                                          impl_->service.activeChannelCount());
+                                          impl_->enabled);
   if(!checked) return {{},report(convert(checked))};
-  size_t expected=0;
-  for(int ch=0;ch<impl_->service.activeChannelCount();++ch)
-    expected+=impl_->config->channels[ch].rods.size();
-  if(loaded.value.targets.size()!=expected)
-    return {{},report(fail(ErrorCode::InvalidTarget,"Position file must include every active Rod"))};
   auto refreshed=refresh();
   if(!refreshed) return {{},refreshed};
-  auto safe=impl_->service.validatePositionSet(loaded.value.targets);
+  std::vector<ff::RodTarget> applicable;
+  for (const auto& target:loaded.value.targets)
+    if (impl_->enabled[static_cast<int>(target.address.channel)])
+      applicable.push_back(target);
+  auto safe=impl_->service.validatePositionSet(applicable);
   if(!safe) return {{},report(convert(safe))};
   PositionSet out;
   out.summary=loaded.value.summary;
-  for(int ch=0;ch<impl_->service.activeChannelCount();++ch)
-    for(const auto& rod:impl_->config->channels[ch].rods) {
-      auto target=std::find_if(loaded.value.targets.begin(),loaded.value.targets.end(),
-        [&](const auto& t){return int(t.address.channel)==ch && t.address.rod==rod.id;});
-      if(target==loaded.value.targets.end())
-        return {{},report(fail(ErrorCode::InvalidTarget,"Missing Rod target"))};
-      out.targets.push_back(external(*target));
-    }
+  for (const auto& target:loaded.value.targets) {
+    const int ch=static_cast<int>(target.address.channel);
+    if (!impl_->enabled[ch] &&
+        std::find(out.ignoredChannels.begin(),out.ignoredChannels.end(),ch)==out.ignoredChannels.end())
+      out.ignoredChannels.push_back(ch);
+  }
+  for (const auto& target:applicable) out.targets.push_back(external(target));
   report({});
   return {std::move(out),{}};
 }
 Result ff_driver::save_positions(const std::string& path,const PositionSet& positions) {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  auto complete=completeTargets(positions.targets,*impl_->config,
-                                impl_->service.activeChannelCount());
-  if (!complete) return report(complete);
   auto refreshed=refresh(); if (!refreshed) return refreshed;
   ff::PositionFileData file{impl_->config->machineId,impl_->config->configVersion,
                             positions.summary,internal(positions.targets)};
   auto checked=ff::PositionFiles::validate(file,*impl_->config,
-                                           impl_->service.activeChannelCount());
+                                           impl_->enabled);
   if (!checked) return report(convert(checked));
   auto safe=impl_->service.validatePositionSet(file.targets);
   if (!safe) return report(convert(safe));
@@ -320,7 +396,8 @@ Result ff_driver::record_positions(const std::string& path,const std::string& su
   if(state.state!=ff::FFState::Ready)
     return report(fail(ErrorCode::SafetyViolation,"Device is not ready to record positions"));
   ff::PositionFileData file{config->machineId,config->configVersion,summary,{}};
-  for(int i=0;i<impl_->service.activeChannelCount();++i) {
+  for(int i=0;i<3;++i) {
+    if (!impl_->enabled[i]) continue;
     if(state.safety[i].state!=ff::SafetyState::Safe)
       return report(fail(ErrorCode::SafetyViolation,"Current channel is unsafe"));
     for(size_t j=0;j<config->channels[i].rods.size();++j) {
@@ -333,7 +410,7 @@ Result ff_driver::record_positions(const std::string& path,const std::string& su
     }
   }
   auto checked=ff::PositionFiles::validate(file,*impl_->config,
-                                           impl_->service.activeChannelCount());
+                                           impl_->enabled);
   if(!checked) return report(convert(checked));
   auto safe=impl_->service.validatePositionSet(file.targets);
   if(!safe) return report(convert(safe));
@@ -341,7 +418,7 @@ Result ff_driver::record_positions(const std::string& path,const std::string& su
 }
 Result ff_driver::move_rods(const std::vector<Target>& targets) {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  auto complete=completeTargets(targets,*impl_->config,impl_->service.activeChannelCount());
+  auto complete=completeTargets(targets,*impl_->config,impl_->enabled);
   if (!complete) return report(complete);
   auto refreshed=refresh(); if (!refreshed) return refreshed;
   auto planned=impl_->service.previewPlan({internal(targets),false});
@@ -351,13 +428,36 @@ Result ff_driver::move_rods(const std::vector<Target>& targets) {
 }
 Result ff_driver::send_rods(const std::vector<Target>& targets) {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  auto complete=completeTargets(targets,*impl_->config,impl_->service.activeChannelCount());
+  auto complete=completeTargets(targets,*impl_->config,impl_->enabled);
   if (!complete) return report(complete);
   return report(convert(impl_->service.setRodTargets(internal(targets))));
 }
+Result ff_driver::send_partial_rods(const std::vector<Target>& targets) {
+  if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
+  if (targets.empty()) return report(fail(ErrorCode::InvalidTarget,"No Rod targets"));
+  std::set<std::pair<int,int>> seen;
+  for (const auto& target:targets) {
+    if (!validAddress(target.address) || !impl_->enabled[target.address.channel] ||
+        !seen.insert({target.address.channel,target.address.rod}).second)
+      return report(fail(ErrorCode::InvalidTarget,"Invalid or duplicate Rod target"));
+  }
+  auto fresh=refresh();
+  if (!fresh) return fresh;
+  auto checked=impl_->service.validatePositionSet(internal(targets));
+  if (!checked) return report(convert(checked));
+  return report(convert(impl_->service.setRodTargets(internal(targets))));
+}
+Result ff_driver::validate_rods(const std::vector<Target>& targets) {
+  if (!impl_->opened) return fail(ErrorCode::NotOpen,"Device is not open");
+  if (targets.empty()) return fail(ErrorCode::InvalidTarget,"No Rod targets");
+  for (const auto& target:targets)
+    if (!validAddress(target.address) || !impl_->enabled[target.address.channel])
+      return fail(ErrorCode::InvalidTarget,"Invalid or disabled Rod address");
+  return convert(impl_->service.validatePositionSet(internal(targets)));
+}
 Result ff_driver::move_rod(Address address,std::int32_t encoder) {
   if(!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  if(!validAddress(address) || address.channel>=impl_->service.activeChannelCount())
+  if(!validAddress(address) || !impl_->enabled[address.channel])
     return report(fail(ErrorCode::InvalidTarget,"Invalid single Rod target"));
   auto config=impl_->service.rodConfig(internal(Target{address,encoder}).address);
   if(!config || encoder<config->softMin || encoder>config->softMax ||
@@ -369,17 +469,17 @@ Result ff_driver::move_rod(Address address,std::int32_t encoder) {
 }
 Result ff_driver::send_rod(Address address,std::int32_t encoder) {
   if (!impl_->opened) return report(fail(ErrorCode::NotOpen,"Device is not open"));
-  if (!validAddress(address) || address.channel>=impl_->service.activeChannelCount())
+  if (!validAddress(address) || !impl_->enabled[address.channel])
     return report(fail(ErrorCode::InvalidTarget,"Invalid single Rod target"));
   return report(convert(impl_->service.setRodTarget(internal(Target{address,encoder}))));
 }
-Result ff_driver::stop() { return impl_->opened ? report(convert(impl_->service.cancelMotion())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
-Result ff_driver::emergency_stop() { return impl_->opened ? report(convert(impl_->service.emergencyStop())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
-Result ff_driver::reset_faults() { return impl_->opened ? report(convert(impl_->service.resetFaults())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
+Result ff_driver::stop() { ++impl_->initializationEpoch; impl_->initialized=false; return impl_->opened ? report(convert(impl_->service.cancelMotion())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
+Result ff_driver::emergency_stop() { ++impl_->initializationEpoch; impl_->initialized=false; return impl_->opened ? report(convert(impl_->service.emergencyStop())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
+Result ff_driver::reset_faults() { ++impl_->initializationEpoch; impl_->initialized=false; return impl_->opened ? report(convert(impl_->service.resetFaults())) : report(fail(ErrorCode::NotOpen,"Device is not open")); }
 ValueResult<Assignment> ff_driver::assign_training(int channel,
   const std::vector<double>& candidates,int excludedRod) {
   if(!impl_->opened) { auto r=report(fail(ErrorCode::NotOpen,"Device is not open")); return {{},r}; }
-  if(channel<0 || channel>=impl_->service.activeChannelCount())
+  if(channel<0 || channel>=3 || !impl_->enabled[channel])
     { auto r=report(fail(ErrorCode::InvalidTarget,"Invalid channel")); return {{},r}; }
   auto refreshed=refresh(); if(!refreshed) return {{},refreshed};
   auto c=impl_->service.config(); auto s=impl_->service.status();
@@ -474,6 +574,8 @@ Result ff_driver::save_training_archive(const std::string& path,
   raw.configVersion=archive.configVersion;
   raw.createdUnixSeconds=archive.createdUnixSeconds;
   raw.selectedChannel=archive.selectedChannel;
+  raw.enabledChannels=archive.enabledChannels;
+  raw.sampleCount=archive.sampleCount;
   for (int ch=0;ch<3;++ch) {
     if (!archive.channels[ch]) continue;
     const auto& session=*archive.channels[ch];
@@ -510,10 +612,12 @@ ValueResult<TrainingArchive> ff_driver::load_training_archive(const std::string&
   out.configVersion=loaded.value.configVersion;
   out.createdUnixSeconds=loaded.value.createdUnixSeconds;
   out.selectedChannel=loaded.value.selectedChannel;
+  out.enabledChannels=loaded.value.enabledChannels;
+  out.sampleCount=loaded.value.sampleCount;
   for (int ch=0;ch<3;++ch)
     if (loaded.value.channels[ch]) out.channels[ch]=external(*loaded.value.channels[ch]);
   report({});
   return {std::move(out),{}};
 }
-const char* ff_driver::version() const noexcept { return "1.0.1"; }
+const char* ff_driver::version() const noexcept { return FF_SDK_VERSION; }
 } // namespace FF

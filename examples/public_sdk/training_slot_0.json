@@ -1,0 +1,47 @@
+{
+  "schema": "FF-POS-2",
+  "machine_id": "SDK-SIM",
+  "config_version": "1",
+  "summary": "Simulation Training initial positions",
+  "channels": [
+    {
+      "channel": 0,
+      "execution_targets": [
+        {
+          "rod": 0,
+          "position": 50
+        },
+        {
+          "rod": 1,
+          "position": 50
+        }
+      ]
+    },
+    {
+      "channel": 1,
+      "execution_targets": [
+        {
+          "rod": 0,
+          "position": 50
+        },
+        {
+          "rod": 1,
+          "position": 50
+        }
+      ]
+    },
+    {
+      "channel": 2,
+      "execution_targets": [
+        {
+          "rod": 0,
+          "position": 50
+        },
+        {
+          "rod": 1,
+          "position": 50
+        }
+      ]
+    }
+  ]
+}

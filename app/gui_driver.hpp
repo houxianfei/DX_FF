@@ -12,14 +12,19 @@ public:
   GuiDriver();
   Result<void> loadConfig(const std::string&, bool,
       const std::array<std::string, 3>&, int);
+  Result<void> loadConfig(const std::string&, bool,
+      const std::array<std::string, 3>&, std::array<bool,3>);
   Result<void> applyConfig(const FFConfig&, bool,
       const std::array<std::string, 3>&, int);
+  Result<void> applyConfig(const FFConfig&, bool,
+      const std::array<std::string, 3>&, std::array<bool,3>);
   Result<void> connect();
   Result<void> disconnect();
   Result<void> refresh();
   Result<void> refreshRod(RodAddress);
   Result<void> setRodTarget(const RodTarget&);
   Result<void> setRodTargets(const std::vector<RodTarget>&);
+  Result<void> setSparseRodTargets(const std::vector<RodTarget>&);
   Result<void> validateRodTargets(const std::vector<RodTarget>&);
   Result<void> cancelMotion();
   Result<void> emergencyStop();
@@ -29,6 +34,7 @@ public:
   bool connected() const noexcept { return connected_; }
   bool simulation() const noexcept { return simulation_; }
   int activeChannelCount() const noexcept { return activeChannels_; }
+  std::array<bool,3> enabledChannels() const noexcept { return enabled_; }
   ::FF::ff_driver& sdk() noexcept { return driver_; }
   const ::FF::ff_driver& sdk() const noexcept { return driver_; }
 
@@ -38,6 +44,7 @@ private:
   std::string configPath_;
   std::array<std::string, 3> ports_{};
   int activeChannels_{3};
+  std::array<bool,3> enabled_{true,true,true};
   bool simulation_{true};
   bool connected_{false};
 };
@@ -50,12 +57,14 @@ Result<void> privateResult(const ::FF::Result&);
 struct PositionFileData {
   std::string machineId, configVersion, summary;
   std::vector<RodTarget> targets;
+  std::vector<int> ignoredChannels;
 };
 class GuiPositionFiles {
 public:
   static Result<PositionFileData> load(GuiDriver&,const std::string&,const FFConfig&);
   static Result<void> save(GuiDriver&,const std::string&,const PositionFileData&);
   static Result<void> validate(const PositionFileData&,const FFConfig&,int);
+  static Result<void> validate(const PositionFileData&,const FFConfig&,std::array<bool,3>);
   static Result<void> execute(GuiDriver&,const PositionFileData&,bool);
 };
 

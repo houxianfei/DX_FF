@@ -9,12 +9,16 @@
 #include "imgui_impl_win32.h"
 #include "implot.h"
 #include "ImGuiFileDialog.h"
+#include <future>
 
 namespace ff_gui {
 class MainUi {
 public:
   MainUi();
   void draw();
+  bool trainingWindowActive() const noexcept {
+    return showTraining_;
+  }
 
 private:
   ff::GuiDriver service_;
@@ -26,7 +30,8 @@ private:
   std::array<std::string, 3> serialPorts_{"COM3", "COM4", "COM5"};
   std::vector<std::string> availablePorts_;
   bool simulation_{true};
-  int enabledChannelCount_{3};
+  int enabledChannelCount_{1};
+  std::array<bool,3> enabledChannels_{true,false,false};
   bool configLoaded_{false};
   bool targetsInitialized_{false};
   int activeChannel_{0};
@@ -45,6 +50,9 @@ private:
   std::string pendingLoadPath_;
   std::string trainingDirectory_;
   std::string trainingNotice_;
+  std::future<::FF::Result> initialization_;
+  ff::FFStatus statusBeforeInitialization_{};
+  void beginInitialize();
   ff::TrainingSession training_{};
   std::array<ff::TrainingSession, 3> trainingSessions_{};
   std::vector<ff::RodTarget> trainingExecutionTargets_;
@@ -54,6 +62,12 @@ private:
   // Scan-specific dwell after in-tolerance feedback.  This is intentionally
   // independent of RodConfig::stableTime, which is used for full motion plans.
   int trainingSettleMs_{20};
+  int trainingSampleCount_{300};
+  int trainingSampleIndex_{0};
+  int trainingOperationChannel_{-1};
+  std::array<std::string,3> trainingPlanSignatures_{};
+  std::chrono::steady_clock::time_point trainingStepStarted_{};
+  std::array<std::optional<std::chrono::steady_clock::time_point>,3> trainingChannelStable_{};
   double trainingNextMm_{0.0};
   std::optional<std::chrono::steady_clock::time_point> trainingStableSince_;
   std::array<bool, 3> trainingRangeInitialized_{};
@@ -70,7 +84,7 @@ private:
   bool hasPresetSlot(int slot) const;
   std::string presetPath(int slot) const;
   bool savePreset(int slot, const std::vector<ff::RodTarget> &targets);
-  std::vector<ff::RodTarget> loadPreset(int slot);
+  ff::Result<ff::PositionFileData> loadPreset(int slot);
   void welcome();
   void dashboard();
   void drawChannel(int index, const ff::FFStatus &status);

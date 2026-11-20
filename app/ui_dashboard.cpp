@@ -17,6 +17,23 @@ void MainUi::drawChannel(int index, const ff::FFStatus &s) {
 
 
 void MainUi::draw() {
+  if (initialization_.valid()) {
+    if (initialization_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+      const auto result=initialization_.get();
+      notice_=result ? "Initialization complete." : "Initialization failed: "+result.message;
+      trainingNotice_=notice_;
+      service_.refresh();
+      targetsInitialized_=false;
+    }
+  }
+  if (showTraining_) {
+    training();
+    return;
+  }
+  if (ImGui::IsWindowCollapsed()) {
+    if (showParameters_) parameters();
+    return;
+  }
   if (!configLoaded_ || !service_.connected()) {
     welcome();
   } else {
@@ -24,12 +41,21 @@ void MainUi::draw() {
   }
   if (showParameters_)
     parameters();
-  if (showTraining_)
-    training();
+}
+void MainUi::beginInitialize() {
+  if (initialization_.valid()) return;
+  if (!hasPresetSlot(0)) { notice_="Initialize failed: slot0 is missing."; trainingNotice_=notice_; return; }
+  const auto path=fs::exists(presetPath(0)) ? presetPath(0) :
+      (fs::path(presetDirectory_)/"slot_0.csv").string();
+  statusBeforeInitialization_=service_.status();
+  initialization_=std::async(std::launch::async,[this,path] {
+    return service_.sdk().initialize(path);
+  });
+  notice_.clear();
+  trainingNotice_.clear();
 }
 void MainUi::welcome() {
   static const char *modes[] = {"Simulation", "Real Hardware"};
-  static const char *channelCounts[] = {"1", "2", "3"};
   constexpr float controlWidth = 240.0f;
   if (ImGui::BeginMenuBar()) {
     if (ImGui::BeginMenu("Tools")) {
@@ -50,20 +76,25 @@ void MainUi::welcome() {
     simulation_ = mode == 0;
     saveUiSettings();
   }
-  int channelCountIndex = enabledChannelCount_ - 1;
-  ImGui::SetNextItemWidth(controlWidth);
-  if (ImGui::Combo("Enabled Channels", &channelCountIndex, channelCounts,
-                   IM_ARRAYSIZE(channelCounts))) {
-    enabledChannelCount_ = channelCountIndex + 1;
-    if (activeChannel_ >= enabledChannelCount_)
-      activeChannel_ = 0;
-    saveUiSettings();
+  ImGui::TextUnformatted("Enabled Channels");
+  for (int i=0;i<3;++i) {
+    if (i) ImGui::SameLine();
+    const auto label="CH"+std::to_string(i+1);
+    bool selected=enabledChannels_[i];
+    if (ImGui::Checkbox(label.c_str(),&selected)) {
+      enabledChannels_[i]=selected;
+      enabledChannelCount_=static_cast<int>(std::count(enabledChannels_.begin(),enabledChannels_.end(),true));
+      if (!enabledChannels_[activeChannel_])
+        for (int ch=0;ch<3;++ch) if (enabledChannels_[ch]) { activeChannel_=ch; break; }
+      saveUiSettings();
+    }
   }
   ImGui::SameLine();
   if (ImGui::Button("Scan Serial Ports"))
     scanSerialPorts();
   ImGui::TextDisabled("%zu serial port(s) detected", availablePorts_.size());
-  for (int i = 0; i < enabledChannelCount_; ++i) {
+  for (int i = 0; i < 3; ++i) {
+    if (!enabledChannels_[i]) continue;
     const auto label = "CH" + std::to_string(i + 1) + " Serial Port";
     const char *preview =
         serialPorts_[i].empty() ? "Select a port" : serialPorts_[i].c_str();
@@ -89,21 +120,20 @@ void MainUi::welcome() {
   ImGui::BeginDisabled(showParameters_);
   if (ImGui::Button("Open FF", ImVec2(180, 0))) {
     bool duplicatePorts = false;
-    for (int i = 0; i < enabledChannelCount_; ++i)
-      for (int j = i + 1; j < enabledChannelCount_; ++j)
-        duplicatePorts = duplicatePorts || serialPorts_[i] == serialPorts_[j];
-    const bool missingPort = std::any_of(
-        serialPorts_.begin(), serialPorts_.begin() + enabledChannelCount_,
-        [this](const auto &port) {
-          return std::find(availablePorts_.begin(), availablePorts_.end(),
-                           port) == availablePorts_.end();
-        });
-    if (!simulation_ && (duplicatePorts || missingPort)) {
+    bool missingPort=false;
+    for (int i = 0; i < 3; ++i) {
+      if (!enabledChannels_[i]) continue;
+      missingPort = missingPort || std::find(availablePorts_.begin(),availablePorts_.end(),serialPorts_[i])==availablePorts_.end();
+      for (int j = i + 1; j < 3; ++j)
+        duplicatePorts = duplicatePorts || (enabledChannels_[j] && serialPorts_[i] == serialPorts_[j]);
+    }
+    if (!enabledChannelCount_) notice_="Select at least one channel.";
+    else if (!simulation_ && (duplicatePorts || missingPort)) {
       notice_ =
           "Select different detected COM ports for every enabled channel.";
     } else {
       auto loaded = service_.loadConfig(configPath_, simulation_, serialPorts_,
-                                        enabledChannelCount_);
+                                        enabledChannels_);
       if (!loaded) {
         configLoaded_ = false;
         notice_ = loaded.message;
@@ -122,6 +152,7 @@ void MainUi::welcome() {
     ImGui::TextColored(ImVec4(1, 0.5f, 0.2f, 1), "%s", notice_.c_str());
 }
 void MainUi::dashboard() {
+  const bool initializing=initialization_.valid();
   if (ImGui::BeginMenuBar()) {
     if (ImGui::BeginMenu("Tools")) {
       if (ImGui::MenuItem("FF_Config")) { showParameters_ = true; initializeParameters(); }
@@ -130,38 +161,43 @@ void MainUi::dashboard() {
     }
     ImGui::EndMenuBar();
   }
-  auto s = service_.status();
+  const auto s = initializing ? statusBeforeInitialization_ : service_.status();
   ImGui::Text("RS485 is connected.  Mode: %s",
               simulation_ ? "Simulation" : "Real Hardware");
   ImGui::SameLine();
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
   if (ImGui::Button("close")) {
     auto x = service_.disconnect();
     if (!x)
       notice_ = x.message;
     targetsInitialized_ = false;
+    ImGui::EndDisabled();
     return;
   }
+  ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Button("EMERGENCY STOP"))
+  if (ImGui::Button("EMERGENCY STOP")) {
     service_.emergencyStop();
-
-  if (ImGui::BeginTabBar("channels")) {
-    for (int i = 0; i < service_.activeChannelCount(); i++) {
-      const std::string label = "CH" + std::to_string(i + 1);
-      if (ImGui::BeginTabItem(label.c_str())) {
-        activeChannel_ = i;
-        drawChannel(i, s);
-        ImGui::EndTabItem();
-      }
+    if (trainingScanning_) {
+      trainingScanning_=false;
+      trainingMovePending_=false;
+      for (auto& session:trainingSessions_) session.complete=false;
+      trainingNotice_="Scan stopped by emergency stop; completed samples were retained.";
     }
-    ImGui::EndTabBar();
   }
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
   ImGui::SeparatorText("Control");
+  ImGui::TextDisabled("Position controls apply to all enabled channels.");
+  if (ImGui::Button(initializing ? "Initializing...##Initialize" : "Initialize##Initialize"))
+    beginInitialize();
+  ImGui::SameLine();
+  ImGui::TextDisabled("Moves every enabled motor to Position Slot 0.");
   if (!targetsInitialized_ && service_.connected()) {
     targets_.clear();
     const auto config = service_.config();
-    if (!config) return;
-    for (int i = 0; i < service_.activeChannelCount(); i++) {
+    if (!config) { ImGui::EndDisabled(); return; }
+    for (int i = 0; i < 3; i++) {
+      if (!service_.enabledChannels()[i]) continue;
       const auto &ch = s.channels[i];
       for (size_t rodIndex = 0; rodIndex < ch.rods.size() &&
                                 rodIndex < config->channels[i].rods.size(); rodIndex++)
@@ -208,16 +244,17 @@ void MainUi::dashboard() {
     auto refreshed = service_.refresh();
     auto current = service_.status();
     bool safe = static_cast<bool>(refreshed);
-    for (int i = 0; i < service_.activeChannelCount(); ++i)
-      safe = safe && current.safety[i].state == ff::SafetyState::Safe;
+    for (int i = 0; i < 3; ++i)
+      if (service_.enabledChannels()[i]) safe = safe && current.safety[i].state == ff::SafetyState::Safe;
     if (!safe) {
       notice_ = refreshed ? "Current positions are unsafe; preset was not saved."
                           : refreshed.message;
     } else {
       std::vector<ff::RodTarget> preset;
       const auto config = service_.config();
-      if (!config) { notice_ = "Configuration is unavailable."; ImGui::EndDisabled(); return; }
-      for (int i = 0; i < service_.activeChannelCount(); ++i) {
+      if (!config) { notice_ = "Configuration is unavailable."; ImGui::EndDisabled(); ImGui::EndDisabled(); return; }
+      for (int i = 0; i < 3; ++i) {
+        if (!service_.enabledChannels()[i]) continue;
         const auto &channel = current.channels[i];
         for (size_t rod = 0; rod < channel.rods.size() &&
                                rod < config->channels[i].rods.size(); ++rod)
@@ -248,16 +285,26 @@ void MainUi::dashboard() {
           ".json", dialogConfig);
     } else {
       auto preset = loadPreset(selectedPresetSlot_);
-      if (preset.empty()) {
-        notice_ = "The selected position preset is invalid or empty.";
+      if (!preset) {
+        notice_ = "Position preset rejected: " + preset.message;
       } else {
-        const auto c = service_.config();
-        auto x = c ? ff::GuiPositionFiles::execute(service_,
-            {c->machineId, c->configVersion, {}, preset}, false) :
-            ff::Result<void>::failure(ff::ErrorCode::NotReady);
+        auto x = ff::GuiPositionFiles::execute(service_,preset.value,false);
         if (x) {
-          targets_ = std::move(preset);
+          for (const auto& target:preset.value.targets) {
+            auto existing=std::find_if(targets_.begin(),targets_.end(),
+                [&](const ff::RodTarget& value){return value.address==target.address;});
+            if (existing==targets_.end()) targets_.push_back(target);
+            else *existing=target;
+          }
           notice_ = slotLabel(selectedPresetSlot_) + " loaded.";
+          if (!preset.value.ignoredChannels.empty()) {
+            notice_ += " Ignored disabled ";
+            for (size_t i=0;i<preset.value.ignoredChannels.size();++i) {
+              if (i) notice_ += ", ";
+              notice_ += "CH"+std::to_string(preset.value.ignoredChannels[i]+1);
+            }
+            notice_ += ".";
+          }
         } else {
           notice_ = x.message + "; restored to the current safe positions.";
         }
@@ -266,7 +313,7 @@ void MainUi::dashboard() {
   }
   ImGui::EndDisabled();
   if (ImGuiFileDialog::Instance()->Display("MainTrainingSlotLoad")) {
-    if (ImGuiFileDialog::Instance()->IsOk()) {
+    if (ImGuiFileDialog::Instance()->IsOk() && !trainingScanning_) {
       const auto path = ImGuiFileDialog::Instance()->GetFilePathName();
       const auto config = service_.config();
       auto loaded = config ? ff::GuiPositionFiles::load(service_, path, *config) :
@@ -286,12 +333,31 @@ void MainUi::dashboard() {
           }
           notice_ = "Position file loaded and executed";
           if (!loaded.value.summary.empty()) notice_ += ": " + loaded.value.summary;
+          if (!loaded.value.ignoredChannels.empty()) {
+            notice_ += "; ignored disabled ";
+            for (size_t index=0;index<loaded.value.ignoredChannels.size();++index) {
+              if (index) notice_ += ", ";
+              notice_ += "CH"+std::to_string(loaded.value.ignoredChannels[index]+1);
+            }
+          }
         }
       }
     }
     ImGuiFileDialog::Instance()->Close();
   }
 
+  if (ImGui::BeginTabBar("channels")) {
+    for (int i = 0; i < 3; i++) {
+      if (!service_.enabledChannels()[i]) continue;
+      const std::string label = "CH" + std::to_string(i + 1);
+      if (ImGui::BeginTabItem(label.c_str())) {
+        activeChannel_ = i;
+        drawChannel(i, s);
+        ImGui::EndTabItem();
+      }
+    }
+    ImGui::EndTabBar();
+  }
   for (auto &r : targets_) {
     if (static_cast<int>(r.address.channel) != activeChannel_)
       continue;
@@ -332,6 +398,7 @@ void MainUi::dashboard() {
       }
     }
   }
+  ImGui::EndDisabled();
   if (!notice_.empty())
     ImGui::TextColored(ImVec4(1, 0.5f, 0.2f, 1), "%s", notice_.c_str());
 }

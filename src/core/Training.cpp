@@ -8,6 +8,10 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace ff {
 namespace {
@@ -212,6 +216,7 @@ std::string decimal(double value) {
 }
 bool validNumbers(const TrainingSession& s) {
   if (!std::isfinite(s.startMm) || !std::isfinite(s.endMm) ||
+      s.sampleCount<2 || s.sampleCount>100000 ||
       !std::isfinite(s.stepMm) || s.stepMm<=0 ||
       std::round(s.stepMm*1000.0)<=0 ||
       !std::isfinite(s.valleySettings.minimumProminenceFraction) ||
@@ -229,6 +234,7 @@ void writeSessionFields(std::ostream& out,const TrainingSession& s,const std::st
       << pad << "\"start_mm\": " << decimal(s.startMm)
       << ", \"end_mm\": " << decimal(s.endMm)
       << ", \"step_mm\": " << decimal(s.stepMm) << ",\n"
+      << pad << "\"sample_count\": " << s.sampleCount << ",\n"
       << pad << "\"complete\": " << (s.complete?"true":"false") << ",\n"
       << pad << "\"valley\": {\"smoothing\": " << s.valleySettings.smoothingPoints
       << ", \"prominence\": " << decimal(s.valleySettings.minimumProminenceFraction)
@@ -632,7 +638,7 @@ Result<void> TrainingAnalysis::saveSession(const std::string &path, const Traini
 static Result<TrainingSession> parseSessionText(const std::string& text) {
   if (stringField(text, "schema") != TrainingSession::Schema) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration, "Unsupported training-session schema");
   TrainingSession s; const auto source=stringField(text,"source"); s.source=source=="Sim2"?TrainingSource::Sim2:source=="Real"?TrainingSource::Real:source=="Loaded"?TrainingSource::Loaded:TrainingSource::Sim1;
-  s.machineId=stringField(text,"machine_id"); s.configVersion=stringField(text,"config_version"); s.occlusionSummary=stringField(text,"occlusion_summary"); s.createdUnixSeconds=static_cast<std::int64_t>(numberField(text,"created_unix_seconds")); s.channel=static_cast<ChannelId>(int(numberField(text,"channel"))); s.trainingRod=static_cast<RodId>(int(numberField(text,"training_rod"))); s.startMm=numberField(text,"start_mm"); s.endMm=numberField(text,"end_mm"); s.stepMm=numberField(text,"step_mm"); s.complete=trainingBoolField(text,"complete");
+  s.machineId=stringField(text,"machine_id"); s.configVersion=stringField(text,"config_version"); s.occlusionSummary=stringField(text,"occlusion_summary"); s.createdUnixSeconds=static_cast<std::int64_t>(numberField(text,"created_unix_seconds")); s.channel=static_cast<ChannelId>(int(numberField(text,"channel"))); s.trainingRod=static_cast<RodId>(int(numberField(text,"training_rod"))); s.startMm=numberField(text,"start_mm"); s.endMm=numberField(text,"end_mm"); s.stepMm=numberField(text,"step_mm"); s.sampleCount=int(numberField(text,"sample_count",300)); s.complete=trainingBoolField(text,"complete");
   const auto valleyPos=text.find("\"valley\""); const auto valley=valleyPos==std::string::npos?std::string{}:text.substr(valleyPos, text.find('}', valleyPos)-valleyPos+1); s.valleySettings.smoothingPoints=int(numberField(valley,"smoothing",5)); s.valleySettings.minimumProminenceFraction=numberField(valley,"prominence",.1); s.valleySettings.minimumDistanceMm=numberField(valley,"distance_mm",.5); s.valleySettings.maximumCount=int(numberField(valley,"maximum"));
   for (const auto &item:objects(arrayBody(text,"samples"))) { const double p=numberField(item,"position_mm",std::numeric_limits<double>::quiet_NaN()); std::uint64_t energy{}; if(!std::isfinite(p)||!unsignedField(item,"energy",energy)) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid training sample"); s.samples.push_back({p,energy}); }
   const std::regex number("-?[0-9]+(?:\\.[0-9]+)?"); const auto candidateBody=arrayBody(text,"candidates_mm"); for(std::sregex_iterator it(candidateBody.begin(),candidateBody.end(),number),end;it!=end;++it){ const double value=std::stod(it->str()); if(!std::isfinite(value)) return Result<TrainingSession>::failure(ErrorCode::InvalidConfiguration,"Invalid candidate"); s.candidatesMm.push_back(value); }
@@ -697,29 +703,51 @@ Result<void> TrainingAnalysis::saveArchive(const std::string& path,
         (int(archive.channels[ch]->channel)!=ch || !validNumbers(*archive.channels[ch])))
       return Result<void>::failure(ErrorCode::InvalidConfiguration,
                                    "Invalid channel data at 0.001 precision");
-  std::ofstream out(path,std::ios::trunc);
+  std::array<bool,3> enabled=archive.enabledChannels;
+  if (!enabled[0] && !enabled[1] && !enabled[2])
+    for (int ch=0;ch<3;++ch) enabled[ch]=archive.channels[ch].has_value();
+  if (archive.sampleCount<2 || archive.sampleCount>100000 ||
+      !enabled[archive.selectedChannel])
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,"Invalid enabled training channels or sample count");
+  for (int ch=0;ch<3;++ch)
+    if (enabled[ch] && !archive.channels[ch])
+      return Result<void>::failure(ErrorCode::InvalidConfiguration,"Missing enabled training channel");
+  const auto temporary=path+".tmp";
+  std::ofstream out(temporary,std::ios::trunc);
   if (!out) return Result<void>::failure(ErrorCode::BackendFailure,
                                          "Could not write training archive");
-  out << "{\n  \"schema\": \"FF-TRAIN-2\",\n"
+  out << "{\n  \"schema\": \"FF-TRAIN-3\",\n"
       << "  \"machine_id\": \"" << escapeJson(archive.machineId) << "\",\n"
       << "  \"config_version\": \"" << escapeJson(archive.configVersion) << "\",\n"
       << "  \"created_unix_seconds\": " << archive.createdUnixSeconds << ",\n"
       << "  \"selected_channel\": " << archive.selectedChannel << ",\n"
+      << "  \"sample_count\": " << archive.sampleCount << ",\n"
+      << "  \"enabled_channels\": [" << (enabled[0]?"true":"false") << ", "
+      << (enabled[1]?"true":"false") << ", " << (enabled[2]?"true":"false") << "],\n"
       << "  \"channels\": [\n";
+  bool first=true;
   for (int ch=0;ch<3;++ch) {
+    if (!enabled[ch]) continue;
+    if (!first) out << ",\n";
+    first=false;
     out << "    {\"channel\": " << ch << ", \"training\": ";
     if (archive.channels[ch]) {
       out << "{\n";
       writeSessionFields(out,*archive.channels[ch],"      ");
       out << "\n    }";
     } else out << "{}";
-    out << "}" << (ch<2?",":"") << '\n';
+    out << "}";
   }
-  out << "  ]\n}\n";
+  out << "\n  ]\n}\n";
   out.flush();
-  return out ? Result<void>::success() :
-               Result<void>::failure(ErrorCode::BackendFailure,
-                                     "Could not finish training archive");
+  const bool written=static_cast<bool>(out);
+  out.close();
+  if (!written || !MoveFileExA(temporary.c_str(),path.c_str(),
+       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    std::remove(temporary.c_str());
+    return Result<void>::failure(ErrorCode::BackendFailure,"Could not finish training archive");
+  }
+  return Result<void>::success();
 }
 Result<TrainingArchive> TrainingAnalysis::loadArchive(const std::string& path) {
   std::ifstream in(path);
@@ -739,25 +767,37 @@ Result<TrainingArchive> TrainingAnalysis::loadArchive(const std::string& path) {
     archive.configVersion=single.value.configVersion;
     archive.createdUnixSeconds=single.value.createdUnixSeconds;
     archive.selectedChannel=ch;
+    archive.enabledChannels[ch]=true;
     archive.channels[ch]=std::move(single.value);
     return Result<TrainingArchive>::success(std::move(archive));
   }
-  if (schema!="FF-TRAIN-2")
+  if (schema!="FF-TRAIN-2" && schema!="FF-TRAIN-3")
     return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
                                             "Unsupported training archive schema");
   archive.machineId=stringField(text,"machine_id");
   archive.configVersion=stringField(text,"config_version");
   archive.createdUnixSeconds=static_cast<std::int64_t>(numberField(text,"created_unix_seconds"));
   archive.selectedChannel=int(numberField(text,"selected_channel",-1));
+  archive.sampleCount=int(numberField(text,"sample_count",300));
   if (archive.machineId.empty() || archive.configVersion.empty() ||
-      archive.selectedChannel<0 || archive.selectedChannel>2)
+      archive.selectedChannel<0 || archive.selectedChannel>2 ||
+      archive.sampleCount<2 || archive.sampleCount>100000)
     return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
                                             "Invalid training archive header");
   const auto channelObjects=objects(arrayBody(text,"channels"));
-  if (channelObjects.size()!=3)
+  if (schema=="FF-TRAIN-2" ? channelObjects.size()!=3 : channelObjects.empty() || channelObjects.size()>3)
     return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
                                             "Training archive must list three channels");
   std::set<int> seen;
+  std::array<bool,3> declared{};
+  if(schema=="FF-TRAIN-3") {
+    const auto mask=arrayBody(text,"enabled_channels");
+    const std::regex pattern(R"(^\s*(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*$)");
+    std::smatch match;
+    if(!std::regex_match(mask,match,pattern))
+      return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,"Invalid enabled channel mask");
+    for(int ch=0;ch<3;++ch) declared[ch]=match[ch+1]=="true";
+  }
   const std::regex emptyTraining("\"training\"\\s*:\\s*\\{\\s*\\}");
   for (const auto& entry:channelObjects) {
     const int ch=int(numberField(entry,"channel",-1));
@@ -766,6 +806,7 @@ Result<TrainingArchive> TrainingAnalysis::loadArchive(const std::string& path) {
       return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
                                               "Invalid training channel entry");
     if (std::regex_search(entry,emptyTraining)) continue;
+    archive.enabledChannels[ch]=true;
     if (stringField(entry,"source").empty())
       return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,
                                               "Incomplete training channel entry");
@@ -781,6 +822,8 @@ Result<TrainingArchive> TrainingAnalysis::loadArchive(const std::string& path) {
                                               "Training channel identity mismatch");
     archive.channels[ch]=std::move(parsed.value);
   }
+  if(schema=="FF-TRAIN-3" && archive.enabledChannels!=declared)
+    return Result<TrainingArchive>::failure(ErrorCode::InvalidConfiguration,"Training channels do not match enabled mask");
   return Result<TrainingArchive>::success(std::move(archive));
 }
 } // namespace ff

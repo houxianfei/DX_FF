@@ -53,6 +53,7 @@ struct TrainingSession {
   ChannelId channel{ChannelId::CH1};
   RodId trainingRod{0};
   double startMm{0.0}, endMm{0.0}, stepMm{0.1};
+  int sampleCount{300};
   ValleyDetectionSettings valleySettings{};
   std::vector<TrainingSample> samples;
   std::vector<double> candidatesMm;
@@ -74,6 +75,8 @@ struct TrainingArchive {
   std::string machineId, configVersion;
   std::int64_t createdUnixSeconds{0};
   int selectedChannel{0};
+  std::array<bool,3> enabledChannels{};
+  int sampleCount{300};
   std::array<std::optional<TrainingSession>,3> channels{};
 };
 

@@ -96,8 +96,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     if config.get("coordinate_units", COORDINATE_UNITS) != COORDINATE_UNITS:
         errors.append("coordinate_units 必须使用 count、mm")
     channels = config.get("channels")
-    if not isinstance(channels, list) or len(channels) != 3:
-        errors.append("channels 必须恰好包含 CH1、CH2、CH3")
+    if not isinstance(channels, list) or not 1 <= len(channels) <= 3:
+        errors.append("channels 必须包含 1..3 个不同的 CH")
         return errors
     seen_channels: set[str] = set()
     ports: set[str] = set()
@@ -129,6 +129,13 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         memberships = ch.get("layer_members", [])
         seen_memberships: set[tuple[int, int]] = set()
         by_member = {(item.get("layer"), item.get("rod_id")): item for item in memberships}
+        if rods:
+            assigned = {item.get("rod_id") for item in memberships}
+            for rid in seen_rods - assigned:
+                errors.append(f"{cid}/Rod{rid}: 缺少 layer_members")
+        rules = ch.get("clearance_rules", [])
+        rule_keys = {(rule.get("layer"), frozenset((rule.get("rod_a"), rule.get("rod_b"))))
+                     for rule in rules}
         for item in memberships:
             layer, rid = item.get("layer"), item.get("rod_id")
             if not isinstance(layer, int) or not isinstance(rid, int) or rid not in seen_rods:
@@ -145,6 +152,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{cid}/layer {layer}/Rod{rid}: left_neighbor 不互反")
             if has_right and by_member.get((layer, right), {}).get("left_neighbor") != rid:
                 errors.append(f"{cid}/layer {layer}/Rod{rid}: right_neighbor 不互反")
+            if has_right and (layer, frozenset((rid, right))) not in rule_keys:
+                errors.append(f"{cid}/layer {layer}/Rod{rid}: 缺少相邻杆间隙规则")
         training_rod = ch.get("training_rod_id")
         if training_rod is not None:
             if not isinstance(training_rod, int) or not 0 <= training_rod <= 255:
@@ -153,8 +162,6 @@ def validate_config(config: dict[str, Any]) -> list[str]:
                 errors.append(f"{cid}: training_rod_id 引用了不存在的 Rod: {training_rod}")
             elif (2, training_rod) not in seen_memberships:
                 errors.append(f"{cid}: training_rod_id 必须属于 Layer 2: {training_rod}")
-    if seen_channels != set(CHANNELS):
-        errors.append("Channel 集合必须为 CH1、CH2、CH3")
     return errors
 
 
@@ -173,8 +180,8 @@ def csv_to_json(directory: Path) -> dict[str, Any]:
         fail("motor.csv 必须恰好有一行")
     if len(system_rows) != 1:
         fail("system.csv 必须恰好有一行")
-    if len(channel_rows) != 3:
-        fail("channels.csv 必须恰好有三行")
+    if not 1 <= len(channel_rows) <= 3:
+        fail("channels.csv 必须有 1..3 行")
     system = system_rows[0]
     channels: list[dict[str, Any]] = []
     for row in channel_rows:

@@ -12,7 +12,32 @@
 namespace fs = std::filesystem;
 namespace ff_gui {
 namespace {
-std::string automaticTrainingFileName(const ff::TrainingSession &session) {
+constexpr float kSettingsSourceX=46.0f;
+constexpr float kSettingsRodX=166.0f;
+constexpr float kSettingsStartX=222.0f;
+constexpr float kSettingsEndX=337.0f;
+constexpr float kSettingsSmoothX=452.0f;
+constexpr float kSettingsProminenceX=552.0f;
+constexpr float kSettingsDistanceX=667.0f;
+constexpr float kSettingsMaxX=797.0f;
+void settingsColumn(float rowStart,float offset) {
+  ImGui::SameLine(0.0f,0.0f);
+  ImGui::SetCursorPosX(rowStart+offset);
+}
+std::string trainingSignature(const ff::TrainingSession& session,int settleMs) {
+  std::ostringstream out;
+  out << std::setprecision(17) << int(session.trainingRod) << ':'
+      << int(session.source) << ':' << session.startMm << ':' << session.endMm
+      << ':' << session.sampleCount << ':' << settleMs << ':'
+      << session.valleySettings.smoothingPoints << ':'
+      << session.valleySettings.minimumProminenceFraction << ':'
+      << session.valleySettings.minimumDistanceMm << ':'
+      << session.valleySettings.maximumCount << ':';
+  for (double candidate:session.candidatesMm) out << candidate << ',';
+  return out.str();
+}
+std::string automaticTrainingFileName(const ff::TrainingSession &session,
+                                      std::array<bool,3> enabled) {
   const auto now = std::chrono::system_clock::now();
   const std::time_t time = std::chrono::system_clock::to_time_t(now);
   std::tm localTime{};
@@ -39,7 +64,10 @@ std::string automaticTrainingFileName(const ff::TrainingSession &session) {
     }
   }
   std::ostringstream name;
-  name << "Training_CH" << (static_cast<int>(session.channel) + 1)
+  name << "Training_";
+  for (int ch=0;ch<3;++ch)
+    if (enabled[ch]) name << "CH" << ch+1;
+  name << "_SelectedCH" << (static_cast<int>(session.channel) + 1)
        << "_Occ" << session.candidatesMm.size()
        << "_" << assignedRange.str() << "_"
        << std::put_time(&localTime, "%Y%m%d_%H%M%S")
@@ -84,16 +112,23 @@ bool MainUi::candidateSetIsLegal(const std::vector<double> &candidates,
 void MainUi::resetTrainingMeasurement() {
   // Keep the operator's per-channel settings, but discard every value that
   // belongs to the previous acquisition / editing / training cycle.
-  training_.samples.clear();
-  training_.candidatesMm.clear();
-  training_.aims.clear();
-  training_.rodStates.clear();
-  training_.occlusionSummary.clear();
-  training_.executionTargets.clear();
-  training_.complete = false;
-  training_.machineId.clear();
-  training_.configVersion.clear();
-  training_.createdUnixSeconds = 0;
+  const int selected=static_cast<int>(training_.channel);
+  if (selected>=0 && selected<3) trainingSessions_[selected]=training_;
+  for (int ch=0;ch<3;++ch) {
+    auto& session=trainingSessions_[ch];
+    session.samples.clear();
+    session.candidatesMm.clear();
+    session.aims.clear();
+    session.rodStates.clear();
+    session.occlusionSummary.clear();
+    session.executionTargets.clear();
+    session.complete=false;
+    session.machineId.clear();
+    session.configVersion.clear();
+    session.createdUnixSeconds=0;
+  }
+  if (selected>=0 && selected<3) training_=trainingSessions_[selected];
+  trainingPlanSignatures_={};
 
   trainingExecutionTargets_.clear();
   trainingEvasionTarget_.reset();
@@ -107,11 +142,6 @@ void MainUi::resetTrainingMeasurement() {
   trainingForbiddenBands_.clear();
   trainingForbiddenDirty_ = true;
 
-  // The channel cache must not restore the discarded measurement when the
-  // operator switches away from this tab and back again.
-  const int channel = static_cast<int>(training_.channel);
-  if (channel >= 0 && channel < static_cast<int>(trainingSessions_.size()))
-    trainingSessions_[channel] = training_;
 }
 
 void MainUi::refreshTrainingForbiddenBands() {
@@ -158,6 +188,8 @@ void MainUi::refreshTrainingForbiddenBands() {
 
 bool MainUi::updateTrainingAssignment() {
   trainingExecutionTargets_.clear();
+  training_.executionTargets.clear();
+  trainingPlanSignatures_[static_cast<int>(training_.channel)].clear();
   trainingEvasionTarget_.reset();
   const auto config = service_.config();
   if (!config) { trainingNotice_ = "No FF configuration is loaded."; return false; }
@@ -167,7 +199,12 @@ bool MainUi::updateTrainingAssignment() {
   const auto assignment = ff::GuiTrainingAnalysis::assign(service_,
       *config, current, training_.channel, training_.candidatesMm,
       training_.trainingRod);
-  if (!assignment) { training_.aims.clear(); trainingNotice_ = assignment.message; return false; }
+  if (!assignment) {
+    training_.aims.clear(); training_.executionTargets.clear();
+    trainingPlanSignatures_[channelIndex].clear();
+    trainingSessions_[channelIndex]=training_;
+    trainingNotice_ = assignment.message; return false;
+  }
   training_.aims = assignment.value.aims;
   const auto &channelStatus = current.channels[channelIndex];
   std::vector<ff::RodTarget> targets;
@@ -197,83 +234,122 @@ bool MainUi::updateTrainingAssignment() {
   const auto validated = service_.validateRodTargets(targets);
   if (validated) {
     trainingExecutionTargets_ = std::move(targets);
+    training_.executionTargets=trainingExecutionTargets_;
+    trainingPlanSignatures_[channelIndex]=trainingSignature(training_,trainingSettleMs_);
     trainingNotice_ = assignment.value.message +
         ". Targets are ready to submit; SDK checks safety when motion starts.";
   } else {
+    training_.executionTargets.clear();
+    trainingPlanSignatures_[channelIndex].clear();
     trainingNotice_ = assignment.value.message +
         ". Execute unavailable: " + validated.message;
   }
+  trainingSessions_[channelIndex]=training_;
   return true;
 }
 
 void MainUi::tickTrainingScan() {
   if (!trainingScanning_) return;
   const auto config = service_.config();
-  if (!config) { trainingScanning_ = false; trainingNotice_ = "Scan stopped: configuration is unavailable."; return; }
-  const int channel = static_cast<int>(training_.channel);
-  auto &rods = config->channels[channel].rods;
-  const auto it = std::find_if(rods.begin(), rods.end(), [&](const ff::RodConfig &r) { return r.id == training_.trainingRod; });
-  if (it == rods.end() || std::abs(it->p1) < 1e-12) { trainingScanning_ = false; trainingNotice_ = "Scan stopped: training Rod calibration is invalid."; return; }
-  const int rodIndex = static_cast<int>(std::distance(rods.begin(), it));
-  // The simulation backend applies a goal synchronously.  Keep the hardware
-  // state machine intact, but advance bounded synchronous simulation
-  // transitions per frame.  Hardware scans use the shorter, user-visible scan
-  // dwell instead of RodConfig::stableTime, which is intended for full plans.
-  const bool fastSimulation = service_.simulation() &&
-      (training_.source == ff::TrainingSource::Sim1 || training_.source == ff::TrainingSource::Sim2);
-  const int budget = fastSimulation ? 48 : 1;
-  for (int transition = 0; transition < budget && trainingScanning_; ++transition) {
-    if (trainingMovePending_) {
-      auto refreshed = service_.refreshRod(
-          {training_.channel, training_.trainingRod});
-      const auto status = service_.status();
-      if (!refreshed || rodIndex >= static_cast<int>(status.channels[channel].rods.size())) {
-        trainingScanning_ = false; trainingMovePending_ = false;
-        trainingNotice_ = refreshed ? "Scan stopped: Rod feedback is unavailable." : refreshed.message;
-        break;
+  if (!config) { trainingScanning_=false; trainingNotice_="Scan stopped: configuration unavailable."; return; }
+  const auto selected=static_cast<int>(training_.channel);
+  trainingSessions_[selected]=training_;
+  const auto fail=[&](const std::string& message) {
+    service_.cancelMotion(); trainingScanning_=false; trainingMovePending_=false;
+    for (int ch=0;ch<3;++ch) trainingSessions_[ch].complete=false;
+    training_=trainingSessions_[selected]; trainingNotice_="Scan stopped: "+message;
+  };
+  const int budget=service_.simulation()?48:1;
+  for (int pass=0;pass<budget && trainingScanning_;++pass) {
+    if (!trainingMovePending_) {
+      std::vector<ff::RodTarget> targets;
+      for (int ch=0;ch<3;++ch) {
+        if (!service_.enabledChannels()[ch]) continue;
+        const auto& session=trainingSessions_[ch];
+        const auto& rods=config->channels[ch].rods;
+        const auto rod=std::find_if(rods.begin(),rods.end(),[&](const auto& r){return r.id==session.trainingRod;});
+        if (rod==rods.end()) { fail("Training Rod missing."); return; }
+        auto target=ff::GuiTrainingAnalysis::scanTarget(session,*rod,
+            trainingSampleIndex_,trainingSampleCount_);
+        if (!target) { fail(target.message); return; }
+        targets.push_back(target.value);
+        trainingChannelStable_[ch].reset();
       }
-      const auto &feedback = status.channels[channel].rods[rodIndex];
-      const auto requestedEncoder = static_cast<int>(std::lround((trainingNextMm_ - it->p0) / it->p1));
-      if (!feedback.positionValid || std::abs(feedback.actualPosition - requestedEncoder) > it->positionTolerance ||
-          feedback.state == ff::RodState::Fault) { trainingStableSince_.reset(); break; }
-      if (!fastSimulation) {
-        if (!trainingStableSince_) { trainingStableSince_ = std::chrono::steady_clock::now(); break; }
-        if (std::chrono::steady_clock::now() - *trainingStableSince_ <
-            std::chrono::milliseconds(trainingSettleMs_)) break;
-      }
-      const double actualMm = it->p0 + it->p1 * feedback.actualPosition;
-      training_.samples.push_back({actualMm, ff::GuiTrainingAnalysis::simulatedEnergy(service_, training_.source, actualMm, training_.startMm, training_.endMm)});
-      const double direction = training_.endMm >= training_.startMm ? 1.0 : -1.0;
-      trainingNextMm_ += direction * training_.stepMm;
-      trainingMovePending_ = false;
-      trainingStableSince_.reset();
-      if ((direction > 0 && trainingNextMm_ > training_.endMm + 1e-9) ||
-          (direction < 0 && trainingNextMm_ < training_.endMm - 1e-9)) {
-        trainingScanning_ = false; training_.complete = true;
-        trainingNotice_ = "Scan complete.";
-      }
+      auto sent=service_.setRodTargets(targets);
+      if (!sent) { fail(sent.message); return; }
+      trainingMovePending_=true;
+      trainingStepStarted_=std::chrono::steady_clock::now();
       continue;
     }
-    const auto encoder = static_cast<int>(std::lround((trainingNextMm_ - it->p0) / it->p1));
-    if (encoder < it->softMin || encoder > it->softMax) {
-      trainingScanning_ = false; trainingNotice_ = "Scan stopped: next point is outside the soft range."; break;
+    auto refreshed=service_.refresh();
+    if (!refreshed) { fail(refreshed.message); return; }
+    const auto status=service_.status();
+    const auto now=std::chrono::steady_clock::now();
+    bool allStable=true;
+    std::array<double,3> actualPositions{};
+    for (int ch=0;ch<3;++ch) {
+      if (!service_.enabledChannels()[ch]) continue;
+      const auto& session=trainingSessions_[ch];
+      const auto& rods=config->channels[ch].rods;
+      const auto rod=std::find_if(rods.begin(),rods.end(),[&](const auto& r){return r.id==session.trainingRod;});
+      if (rod==rods.end()) { fail("Training Rod missing."); return; }
+      const auto index=static_cast<size_t>(std::distance(rods.begin(),rod));
+      if (index>=status.channels[ch].rods.size()) { fail("Rod feedback missing."); return; }
+      const auto& feedback=status.channels[ch].rods[index];
+      if (!feedback.positionValid || feedback.alarm) { fail("Rod feedback invalid or alarmed."); return; }
+      auto target=ff::GuiTrainingAnalysis::scanTarget(session,*rod,
+          trainingSampleIndex_,trainingSampleCount_);
+      if (!target) { fail(target.message); return; }
+      if (std::abs(feedback.actualPosition-target.value.position)>rod->positionTolerance)
+        trainingChannelStable_[ch].reset();
+      else if (!trainingChannelStable_[ch]) trainingChannelStable_[ch]=now;
+      if (!trainingChannelStable_[ch] || now-*trainingChannelStable_[ch]<std::chrono::milliseconds(trainingSettleMs_))
+        allStable=false;
+      actualPositions[ch]=rod->p0+rod->p1*feedback.actualPosition;
+      if ((!trainingChannelStable_[ch] ||
+           now-*trainingChannelStable_[ch]<std::chrono::milliseconds(trainingSettleMs_)) &&
+          now-trainingStepStarted_>rod->moveTimeout) { fail("Scan point timed out."); return; }
     }
-    ff::RodTarget moveTarget{{training_.channel, training_.trainingRod}, encoder};
-    auto move = service_.setRodTarget(moveTarget);
-    if (!move) { trainingScanning_ = false; trainingNotice_ = "Scan stopped: " + move.message; break; }
-    trainingMovePending_ = true;
+    if (!allStable) break;
+    std::array<ff::TrainingSample,3> round{};
+    for (int ch=0;ch<3;++ch) {
+      if (!service_.enabledChannels()[ch]) continue;
+      const auto& session=trainingSessions_[ch];
+      const double actual=actualPositions[ch];
+      round[ch]={actual,ff::GuiTrainingAnalysis::simulatedEnergy(service_,
+          session.source,actual,session.startMm,session.endMm)};
+    }
+    for (int ch=0;ch<3;++ch)
+      if (service_.enabledChannels()[ch]) trainingSessions_[ch].samples.push_back(round[ch]);
+    ++trainingSampleIndex_; trainingMovePending_=false;
+    if (trainingSampleIndex_>=trainingSampleCount_) {
+      trainingScanning_=false;
+      for (int ch=0;ch<3;++ch)
+        if (service_.enabledChannels()[ch]) trainingSessions_[ch].complete=true;
+      trainingNotice_="Scan complete.";
+    }
+    training_=trainingSessions_[selected];
   }
 }
 
 void MainUi::training() {
   bool open = showTraining_;
   bool trainingSettingsChanged = false;
-  ImGui::SetNextWindowSize(ImVec2(1120, 760), ImGuiCond_FirstUseEver);
-  if (!ImGui::Begin("Training", &open)) { ImGui::End(); showTraining_ = open; return; }
+  const bool initializing=initialization_.valid();
+  ImGuiWindowClass windowClass;
+  windowClass.ViewportFlagsOverrideSet=ImGuiViewportFlags_NoAutoMerge;
+  ImGui::SetNextWindowClass(&windowClass);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos,ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size,ImGuiCond_FirstUseEver);
+  const bool expanded=ImGui::Begin("Training", &open);
   showTraining_ = open;
   if (!open && trainingScanning_) {
     service_.cancelMotion(); trainingScanning_ = false; trainingMovePending_ = false; trainingStableSince_.reset();
     training_.complete = false; trainingNotice_ = "Scan stopped when the window was closed; partial samples were retained.";
+  }
+  if (!expanded) {
+    if (trainingScanning_) tickTrainingScan();
+    ImGui::End(); return;
   }
   if (!service_.connected()) {
     ImGui::TextColored(ImVec4(1, .5f, .2f, 1), "Open FF before starting a training scan.");
@@ -283,9 +359,164 @@ void MainUi::training() {
   const auto config = service_.config();
   if (!config) { ImGui::Text("No configuration is loaded."); ImGui::End(); return; }
   int channel = static_cast<int>(training_.channel);
-  ImGui::BeginDisabled(trainingScanning_);
+  if (!service_.enabledChannels()[channel]) {
+    for (int ch=0;ch<3;++ch)
+      if (service_.enabledChannels()[ch]) { channel=ch; training_=trainingSessions_[ch]; break; }
+  }
+  trainingSessions_[channel]=training_;
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
+  if (ImGui::CollapsingHeader("Settings",ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::TextUnformatted("Samples");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(90.0f);
+    if (ImGui::InputInt("##Samples", &trainingSampleCount_,0,0)) {
+      trainingSampleCount_=std::clamp(trainingSampleCount_,2,100000);
+      trainingSettingsChanged=true;
+    }
+    ImGui::SameLine(); ImGui::TextUnformatted("Scan Settle (ms)");
+    ImGui::SameLine(); ImGui::SetNextItemWidth(90.0f);
+    if (ImGui::InputInt("##Settle", &trainingSettleMs_,0,0)) {
+      trainingSettleMs_=std::clamp(trainingSettleMs_,0,500);
+      trainingSettingsChanged=true;
+    }
+    tooltip("Wait after every enabled Training Rod reaches its position tolerance before recording a sample. Default: 20 ms.");
+    ImGui::Spacing();
+    const float headerStart=ImGui::GetCursorPosX();
+    ImGui::TextDisabled("CH");
+    settingsColumn(headerStart,kSettingsSourceX); ImGui::TextDisabled("Data Source");
+    settingsColumn(headerStart,kSettingsRodX); ImGui::TextDisabled("Rod");
+    settingsColumn(headerStart,kSettingsStartX); ImGui::TextDisabled("Start (mm)");
+    settingsColumn(headerStart,kSettingsEndX); ImGui::TextDisabled("End (mm)");
+    settingsColumn(headerStart,kSettingsSmoothX); ImGui::TextDisabled("Smoothing");
+    settingsColumn(headerStart,kSettingsProminenceX); ImGui::TextDisabled("Prominence");
+    settingsColumn(headerStart,kSettingsDistanceX); ImGui::TextDisabled("Min Distance");
+    settingsColumn(headerStart,kSettingsMaxX); ImGui::TextDisabled("Max Valleys");
+    const auto currentStatus=initializing ? statusBeforeInitialization_ : service_.status();
+    for (int ch=0;ch<3;++ch) {
+      if (!service_.enabledChannels()[ch]) continue;
+      ImGui::PushID(ch);
+      auto saved=training_;
+      training_=trainingSessions_[ch];
+      drawTrainingSettings(*config,ch,currentStatus,config->channels[ch].trainingRod,
+                           trainingSettingsChanged);
+      training_.sampleCount=trainingSampleCount_;
+      trainingSessions_[ch]=training_;
+      training_=saved;
+      ImGui::PopID();
+    }
+    ImGui::TextDisabled("Real camera acquisition is unavailable in this build.");
+  }
+  ImGui::EndDisabled();
+  for (int ch=0;ch<3;++ch)
+    if (service_.enabledChannels()[ch]) trainingSessions_[ch].sampleCount=trainingSampleCount_;
+  training_=trainingSessions_[channel];
+  trainingExecutionTargets_=training_.executionTargets;
+  drawTrainingScanActions(*config,channel,config->channels[channel].trainingRod);
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
+  const auto operationLabel=trainingOperationChannel_<0 ? std::string("All enabled channels") :
+      "CH"+std::to_string(trainingOperationChannel_+1);
+  ImGui::TextUnformatted("Analysis Target");
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(220.0f);
+  if (ImGui::BeginCombo("##AnalysisTarget",operationLabel.c_str())) {
+    if (ImGui::Selectable("All enabled channels",trainingOperationChannel_<0)) trainingOperationChannel_=-1;
+    for (int ch=0;ch<3;++ch) {
+      if (!service_.enabledChannels()[ch]) continue;
+      const auto label="CH"+std::to_string(ch+1);
+      if (ImGui::Selectable(label.c_str(),trainingOperationChannel_==ch)) trainingOperationChannel_=ch;
+    }
+    ImGui::EndCombo();
+  }
+  const auto selectedForOperation=[&](int ch) {
+    return service_.enabledChannels()[ch] && (trainingOperationChannel_<0 || trainingOperationChannel_==ch);
+  };
+  if (ImGui::Button("Find Valleys")) {
+    trainingSessions_[channel]=training_;
+    for (int ch=0;ch<3;++ch) {
+      if (!selectedForOperation(ch)) continue;
+      auto& session=trainingSessions_[ch];
+      session.candidatesMm.clear(); session.aims.clear(); session.executionTargets.clear();
+      trainingPlanSignatures_[ch].clear();
+      const auto found=ff::GuiTrainingAnalysis::findValleys(service_,session.samples,session.valleySettings);
+      for (double position:found) {
+        const double left=std::min(session.startMm,session.endMm)+1.5;
+        const double right=std::max(session.startMm,session.endMm)-1.5;
+        if (position<left || position>right) continue;
+        if (std::any_of(session.candidatesMm.begin(),session.candidatesMm.end(),
+            [&](double previous){return std::abs(previous-position)<3.0;})) continue;
+        session.candidatesMm.push_back(position);
+      }
+    }
+    training_=trainingSessions_[channel]; trainingExecutionTargets_.clear();
+    trainingForbiddenDirty_=true; trainingNotice_="Valley candidates updated.";
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear Lines")) {
+    trainingSessions_[channel]=training_;
+    for (int ch=0;ch<3;++ch) {
+      if (!selectedForOperation(ch)) continue;
+      auto& session=trainingSessions_[ch];
+      session.candidatesMm.clear();session.aims.clear();session.executionTargets.clear();
+      trainingPlanSignatures_[ch].clear();
+    }
+    training_=trainingSessions_[channel];trainingExecutionTargets_.clear();
+    trainingForbiddenDirty_=true;trainingNotice_="Candidate lines cleared.";
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Plan")) {
+    trainingSessions_[channel]=training_;
+    const auto displayed=channel;
+    bool any=false,success=true;
+    for (int ch=0;ch<3;++ch) {
+      if (!selectedForOperation(ch) || trainingSessions_[ch].candidatesMm.empty()) continue;
+      any=true;training_=trainingSessions_[ch];
+      if (!updateTrainingAssignment() || training_.executionTargets.empty()) {
+        success=false;break;
+      }
+    }
+    training_=trainingSessions_[displayed];
+    trainingExecutionTargets_=training_.executionTargets;
+    if (!any) trainingNotice_="No candidate lines to plan.";
+    else if (success) trainingNotice_="Selected channels planned; Execute checks all enabled channels.";
+  }
+  ImGui::SameLine();
+  bool anyCandidates=false;
+  for (int ch=0;ch<3;++ch)
+    if (service_.enabledChannels()[ch] && !trainingSessions_[ch].candidatesMm.empty())
+      anyCandidates=true;
+  ImGui::BeginDisabled(!anyCandidates);
+  if (ImGui::Button("Execute")) {
+    trainingSessions_[channel]=training_;
+    if (!service_.sdk().m_status.initialized) trainingNotice_="Initialize from slot0 before Execute.";
+    else {
+      std::vector<ff::RodTarget> combined;
+      bool valid=true,any=false;
+      for (int ch=0;ch<3;++ch) {
+        if (!service_.enabledChannels()[ch]) continue;
+        const auto& session=trainingSessions_[ch];
+        if (session.candidatesMm.empty()) continue;
+        any=true;
+        if (session.executionTargets.empty() ||
+            trainingPlanSignatures_[ch]!=trainingSignature(session,trainingSettleMs_)) {
+          valid=false;trainingNotice_="CH"+std::to_string(ch+1)+" needs a current Plan.";break;
+        }
+        combined.insert(combined.end(),session.executionTargets.begin(),session.executionTargets.end());
+      }
+      if (!any) trainingNotice_="No candidate lines to execute.";
+      else if (valid) {
+        auto result=service_.setRodTargets(combined);
+        if (!result) trainingNotice_="Execute failed: "+result.message;
+        else {
+          service_.refresh();targetsInitialized_=false;
+          trainingNotice_="Training targets sent for all planned channels.";
+        }
+      }
+    }
+  }
+  ImGui::EndDisabled();
+  ImGui::EndDisabled();
   if (ImGui::BeginTabBar("TrainingChannels")) {
-    for (int candidate = 0; candidate < service_.activeChannelCount(); ++candidate) {
+    for (int candidate = 0; candidate < 3; ++candidate) {
+      if (!service_.enabledChannels()[candidate]) continue;
       const std::string label = "CH" + std::to_string(candidate + 1);
       if (!ImGui::BeginTabItem(label.c_str())) continue;
       if (channel != candidate) {
@@ -293,7 +524,7 @@ void MainUi::training() {
       channel = candidate;
       training_ = trainingSessions_[channel];
       training_.channel = static_cast<ff::ChannelId>(channel);
-      trainingExecutionTargets_.clear();
+      trainingExecutionTargets_=training_.executionTargets;
       trainingEvasionTarget_.reset();
       trainingForbiddenDirty_ = true;
       trainingDraggingCandidate_ = -1;
@@ -304,7 +535,6 @@ void MainUi::training() {
     }
     ImGui::EndTabBar();
   }
-  ImGui::EndDisabled();
   const auto &rods = config->channels[channel].rods;
   const auto configuredTrainingRod = config->channels[channel].trainingRod;
   if (configuredTrainingRod)
@@ -338,15 +568,16 @@ void MainUi::training() {
     }
     trainingRangeInitialized_[channel] = true;
   }
-  const auto currentStatus = service_.status();
-  drawTrainingSettings(*config, channel, currentStatus, configuredTrainingRod,
-                       trainingSettingsChanged);
-  drawTrainingScanActions(*config, channel, configuredTrainingRod);
+  const auto currentStatus = initializing ? statusBeforeInitialization_ : service_.status();
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
   drawTrainingCandidates(*config, channel, configuredTrainingRod,
                          layer2TrainingRodCount, trainingCandidateCapacityReached,
                          trainingSettingsChanged);
   drawTrainingResults(*config, channel, currentStatus);
+  ImGui::EndDisabled();
+  ImGui::BeginDisabled(initializing);
   drawTrainingFiles(*config);
+  ImGui::EndDisabled();
   if (trainingSettingsChanged)
     saveUiSettings();
   ImGui::End();
@@ -354,28 +585,33 @@ void MainUi::training() {
 
 
 void MainUi::drawTrainingSettings(const ff::FFConfig& config, int channel, const ff::FFStatus& currentStatus, std::optional<ff::RodId> configuredTrainingRod, bool& trainingSettingsChanged) {
-  constexpr float sourceWidth = 120.0f;
-  constexpr float numberWidth = 108.0f;
   const auto& rods = config.channels[channel].rods;
-  if (!ImGui::CollapsingHeader("Settings")) return;
   const char *sources[] = {"Sim1", "Sim2", "Real", "Loaded"};
   int source = static_cast<int>(training_.source);
-  ImGui::SetNextItemWidth(sourceWidth);
-  if (ImGui::Combo("Data Source", &source, sources, IM_ARRAYSIZE(sources))) {
-    training_.source = static_cast<ff::TrainingSource>(source);
-    training_.aims.clear();
-    trainingExecutionTargets_.clear();
-    trainingEvasionTarget_.reset();
-    trainingSettingsChanged = true;
+  const float rowStart=ImGui::GetCursorPosX();
+  ImGui::Text("CH%d",channel+1);
+  settingsColumn(rowStart,kSettingsSourceX);
+  ImGui::SetNextItemWidth(110.0f);
+  if (ImGui::BeginCombo("##Source",sources[std::clamp(source,0,3)])) {
+    for (int option=0;option<IM_ARRAYSIZE(sources);++option) {
+      ImGui::BeginDisabled(option==static_cast<int>(ff::TrainingSource::Real));
+      if (ImGui::Selectable(sources[option],source==option)) {
+        training_.source=static_cast<ff::TrainingSource>(option);
+        training_.aims.clear();
+        training_.executionTargets.clear();
+        trainingExecutionTargets_.clear();
+        trainingEvasionTarget_.reset();
+        trainingSettingsChanged=true;
+      }
+      ImGui::EndDisabled();
+    }
+    ImGui::EndCombo();
   }
-  ImGui::SameLine();
-  ImGui::TextDisabled("Real: Itek camera runtime/hardware is not available in this build.");
+  settingsColumn(rowStart,kSettingsRodX);
   if (configuredTrainingRod) {
-    ImGui::TextDisabled("Training Rod: Rod %d (FF config)",
-                        int(*configuredTrainingRod));
+    ImGui::TextDisabled("R%d",int(*configuredTrainingRod));
   } else {
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f),
-                       "Training Rod: not configured in FF config.");
+    ImGui::TextColored(ImVec4(1.0f,0.5f,0.2f,1.0f),"Missing");
   }
   const auto selectedRod = configuredTrainingRod
       ? std::find_if(rods.begin(), rods.end(), [&](const ff::RodConfig &entry) {
@@ -386,44 +622,36 @@ void MainUi::drawTrainingSettings(const ff::FFConfig& config, int channel, const
     const auto rodIndex = static_cast<size_t>(std::distance(rods.begin(), selectedRod));
     if (rodIndex < currentStatus.channels[channel].rods.size()) {
       const auto &feedback = currentStatus.channels[channel].rods[rodIndex];
-      ImGui::SameLine();
-      ImGui::TextDisabled("Current: %d (%.4f mm)  Target: %d (%.4f mm)",
-                          feedback.actualPosition,
-                          selectedRod->p0 + selectedRod->p1 * feedback.actualPosition,
-                          feedback.targetPosition,
-                          selectedRod->p0 + selectedRod->p1 * feedback.targetPosition);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Current: %d (%.4f mm)\nTarget: %d (%.4f mm)",
+            feedback.actualPosition,selectedRod->p0+selectedRod->p1*feedback.actualPosition,
+            feedback.targetPosition,selectedRod->p0+selectedRod->p1*feedback.targetPosition);
     }
   }
-  ImGui::SetNextItemWidth(numberWidth);
-  trainingSettingsChanged |= ImGui::InputDouble("Start (mm)", &training_.startMm, .1, 1, "%.4f");
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(numberWidth);
-  trainingSettingsChanged |= ImGui::InputDouble("End (mm)", &training_.endMm, .1, 1, "%.4f");
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(numberWidth);
-  trainingSettingsChanged |= ImGui::InputDouble("Step (mm)", &training_.stepMm, .01, .1, "%.4f");
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(numberWidth);
-  if (ImGui::InputInt("Scan Settle (ms)", &trainingSettleMs_)) {
-    trainingSettleMs_ = std::clamp(trainingSettleMs_, 0, 500);
-    trainingSettingsChanged = true;
-  }
-  tooltip("After feedback reaches the configured position tolerance, wait this long before recording the scan sample. Default: 20 ms. This affects Training scans only, not normal motion-plan stability checks.");
-  ImGui::SeparatorText("Valley Detection");
-  ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputInt("Smoothing", &training_.valleySettings.smoothingPoints);
-  ImGui::SameLine(); ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputDouble("Prominence", &training_.valleySettings.minimumProminenceFraction, .01, .1, "%.3f");
-  ImGui::SameLine(); ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputDouble("Min Distance (mm)", &training_.valleySettings.minimumDistanceMm, .1, 1, "%.3f");
-  ImGui::SameLine(); ImGui::SetNextItemWidth(numberWidth); trainingSettingsChanged |= ImGui::InputInt("Max Valleys", &training_.valleySettings.maximumCount);
+  settingsColumn(rowStart,kSettingsStartX); ImGui::SetNextItemWidth(105.0f);
+  trainingSettingsChanged |= ImGui::InputDouble("##Start",&training_.startMm,0,0,"%.4f");
+  settingsColumn(rowStart,kSettingsEndX); ImGui::SetNextItemWidth(105.0f);
+  trainingSettingsChanged |= ImGui::InputDouble("##End",&training_.endMm,0,0,"%.4f");
+  settingsColumn(rowStart,kSettingsSmoothX); ImGui::SetNextItemWidth(90.0f);
+  trainingSettingsChanged |= ImGui::InputInt("##Smooth",&training_.valleySettings.smoothingPoints,0,0);
+  settingsColumn(rowStart,kSettingsProminenceX); ImGui::SetNextItemWidth(105.0f);
+  trainingSettingsChanged |= ImGui::InputDouble("##Prominence",&training_.valleySettings.minimumProminenceFraction,0,0,"%.3f");
+  settingsColumn(rowStart,kSettingsDistanceX); ImGui::SetNextItemWidth(120.0f);
+  trainingSettingsChanged |= ImGui::InputDouble("##Distance",&training_.valleySettings.minimumDistanceMm,0,0,"%.3f");
+  settingsColumn(rowStart,kSettingsMaxX); ImGui::SetNextItemWidth(90.0f);
+  trainingSettingsChanged |= ImGui::InputInt("##MaxValleys",&training_.valleySettings.maximumCount,0,0);
   if (trainingSettingsChanged) trainingForbiddenDirty_ = true;
 }
 
 void MainUi::drawTrainingScanActions(const ff::FFConfig& config, int channel, std::optional<ff::RodId> configuredTrainingRod) {
   constexpr float actionWidth = 112.0f;
   const auto& rods = config.channels[channel].rods;
-  const bool canScan = configuredTrainingRod && !trainingScanning_ && training_.source != ff::TrainingSource::Real &&
+  const bool initializing=initialization_.valid();
+  const bool canScan = configuredTrainingRod && !trainingScanning_ && !initializing && training_.source != ff::TrainingSource::Real &&
                        training_.source != ff::TrainingSource::Loaded;
-  ImGui::BeginDisabled(trainingScanning_);
-  if (ImGui::Button("Initialize", ImVec2(actionWidth, 0))) initializeTraining();
+  ImGui::BeginDisabled(trainingScanning_ || initializing);
+  if (ImGui::Button(initializing ? "Initializing...##Initialize" : "Initialize##Initialize",
+                    ImVec2(actionWidth, 0))) initializeTraining();
   tooltip("Move all Rods to the positions saved in Main UI Position Slot 0.");
   ImGui::EndDisabled();
   ImGui::SameLine();
@@ -435,53 +663,89 @@ void MainUi::drawTrainingScanActions(const ff::FFConfig& config, int channel, st
   ImGui::SameLine();
   ImGui::BeginDisabled(!trainingScanning_);
   if (ImGui::Button("Stop Scan", ImVec2(actionWidth, 0))) {
-    service_.cancelMotion(); trainingScanning_ = false; trainingMovePending_ = false; trainingStableSince_.reset(); training_.complete = false;
+    service_.cancelMotion();
+    trainingScanning_ = false; trainingMovePending_ = false;
+    trainingStableSince_.reset(); training_.complete = false;
     trainingNotice_ = "Scan stopped; partial samples were retained.";
   }
   tooltip("Stop the active scan and retain all samples already collected.");
   ImGui::EndDisabled();
   ImGui::SameLine();
+  if (ImGui::Button("EMERGENCY STOP")) {
+    auto stopped=service_.emergencyStop();
+    trainingScanning_=false;
+    trainingMovePending_=false;
+    trainingStableSince_.reset();
+    training_.complete=false;
+    for (auto& session:trainingSessions_) session.complete=false;
+    trainingNotice_=stopped ? "Emergency stop; completed samples were retained."
+                            : "Emergency stop failed: "+stopped.message;
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(initializing);
   if (ImGui::Button("Save Session", ImVec2(actionWidth, 0)))
     saveTrainingSession(config);
-  tooltip("Save all three channel sessions to training_sessions with an automatic name.");
+  tooltip("Save the sessions for all enabled channels to training_sessions with an automatic name.");
   ImGui::SameLine();
   if (ImGui::Button("Load Session", ImVec2(actionWidth, 0))) ImGuiFileDialog::Instance()->OpenDialog("TrainingLoad", "Load Training Session", ".json", {trainingDirectory_});
   tooltip("Load a previously saved Training session for viewing, editing, and retraining.");
+  ImGui::EndDisabled();
 
 }
 
 void MainUi::initializeTraining() {
+  if (!hasPresetSlot(0)) { beginInitialize(); return; }
   resetTrainingMeasurement();
-  if (!hasPresetSlot(0)) {
-    trainingNotice_ = "Initialize unavailable: Position Slot 0 has not been saved.";
-    return;
-  }
-  auto initialTargets = loadPreset(0);
-  if (initialTargets.empty()) {
-    trainingNotice_ = "Initialize failed: Position Slot 0 is invalid or empty.";
-    return;
-  }
-  const auto config = service_.config();
-  if (!config) {
-    trainingNotice_ = "Initialize failed: no configuration is loaded.";
-    return;
-  }
-  const auto result = ff::GuiPositionFiles::execute(
-      service_, {config->machineId, config->configVersion, {}, initialTargets}, false);
-  if (!result) {
-    trainingNotice_ = "Initialize failed: " + result.message;
-    return;
-  }
-  service_.refresh();
-  targets_ = std::move(initialTargets);
-  trainingNotice_ = "Moved to the positions saved in Position Slot 0.";
+  beginInitialize();
 }
 
 void MainUi::startTrainingScan(const ff::FFConfig& config,
                                const std::vector<ff::RodConfig>& rods) {
-  if (training_.stepMm <= 0 || rods.empty()) {
-    trainingNotice_ = "Step must be positive and the channel must contain a Rod.";
+  if (!service_.sdk().m_status.initialized) {
+    trainingNotice_="Initialize from complete slot0 before scanning.";
     return;
+  }
+  trainingSessions_[static_cast<int>(training_.channel)]=training_;
+  if (trainingSampleCount_<2 || trainingSampleCount_>100000) {
+    trainingNotice_="Sample count must be 2..100000."; return;
+  }
+  for (int ch=0;ch<3;++ch) {
+    if (!service_.enabledChannels()[ch]) continue;
+    auto& session=trainingSessions_[ch];
+    session.sampleCount=trainingSampleCount_;
+    const auto& channel=config.channels[ch];
+    if (!channel.trainingRod || session.source==ff::TrainingSource::Real ||
+        session.source==ff::TrainingSource::Loaded) {
+      trainingNotice_="CH"+std::to_string(ch+1)+" has no available Training Rod or source."; return;
+    }
+    session.trainingRod=*channel.trainingRod;
+    const auto rod=std::find_if(channel.rods.begin(),channel.rods.end(),
+        [&](const auto& r){return r.id==session.trainingRod;});
+    if (rod==channel.rods.end() || !std::isfinite(session.startMm) ||
+        !std::isfinite(session.endMm) || session.startMm==session.endMm ||
+        !std::isfinite(rod->p0) || !std::isfinite(rod->p1) || std::abs(rod->p1)<1e-12) {
+      trainingNotice_="CH"+std::to_string(ch+1)+" scan settings are invalid."; return;
+    }
+    const double a=rod->p0+rod->p1*rod->softMin;
+    const double b=rod->p0+rod->p1*rod->softMax;
+    if (std::min(session.startMm,session.endMm)<std::min(a,b) ||
+        std::max(session.startMm,session.endMm)>std::max(a,b)) {
+      trainingNotice_="CH"+std::to_string(ch+1)+" scan range exceeds soft limits."; return;
+    }
+    for (int sample=0;sample<trainingSampleCount_;++sample) {
+      auto target=ff::GuiTrainingAnalysis::scanTarget(session,*rod,sample,
+          trainingSampleCount_);
+      if (!target) { trainingNotice_=target.message; return; }
+      const auto encoder=target.value.position;
+      if (encoder<rod->softMin || encoder>rod->softMax ||
+          encoder<rod->hardMin || encoder>rod->hardMax ||
+          std::any_of(rod->forbiddenRanges.begin(),rod->forbiddenRanges.end(),
+              [encoder](const auto& range){return encoder>=range.first && encoder<=range.second;})) {
+        trainingNotice_="CH"+std::to_string(ch+1)+" sample "+
+            std::to_string(sample+1)+" violates a Rod limit or forbidden range.";
+        return;
+      }
+    }
   }
   if (std::abs(training_.startMm - training_.endMm) < 1e-9) {
     trainingNotice_ = "Start and end must be different to produce a curve.";
@@ -502,9 +766,32 @@ void MainUi::startTrainingScan(const ff::FFConfig& config,
     trainingNotice_ = "Start and end must be within the selected Rod soft range.";
     return;
   }
+  auto fresh=service_.refresh();
+  if (!fresh) { trainingNotice_="Scan preflight failed: "+fresh.message; return; }
+  for (int sample=0;sample<trainingSampleCount_;++sample) {
+    std::vector<::FF::Target> targets;
+    for (int ch=0;ch<3;++ch) {
+      if (!service_.enabledChannels()[ch]) continue;
+      const auto& session=trainingSessions_[ch];
+      const auto& configured=config.channels[ch].rods;
+      const auto rod=std::find_if(configured.begin(),configured.end(),
+          [&](const auto& value){return value.id==session.trainingRod;});
+      auto target=ff::GuiTrainingAnalysis::scanTarget(session,*rod,sample,
+          trainingSampleCount_);
+      if (!target) { trainingNotice_=target.message; return; }
+      targets.push_back({{ch,int(session.trainingRod)},target.value.position});
+    }
+    auto valid=service_.sdk().validate_rods(targets);
+    if (!valid) {
+      trainingNotice_="Scan preflight failed at sample "+std::to_string(sample+1)+
+          ": "+valid.message;
+      return;
+    }
+  }
   training_.samples.clear();
   training_.candidatesMm.clear();
   training_.aims.clear();
+  training_.executionTargets.clear();
   trainingExecutionTargets_.clear();
   trainingForbiddenDirty_ = true;
   training_.complete = false;
@@ -512,6 +799,20 @@ void MainUi::startTrainingScan(const ff::FFConfig& config,
   training_.configVersion = config.configVersion;
   training_.createdUnixSeconds = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
+  trainingSessions_[static_cast<int>(training_.channel)]=training_;
+  for (int ch=0;ch<3;++ch) {
+    if (!service_.enabledChannels()[ch] || ch==static_cast<int>(training_.channel)) continue;
+    auto& session=trainingSessions_[ch];
+    session.samples.clear(); session.candidatesMm.clear(); session.aims.clear();
+    session.executionTargets.clear(); session.complete=false;
+    session.machineId=config.machineId; session.configVersion=config.configVersion;
+    session.createdUnixSeconds=training_.createdUnixSeconds;
+  }
+  trainingPlanSignatures_={};
+  trainingDraggingCandidate_=-1;
+  trainingSampleIndex_=0;
+  trainingMovePending_=false;
+  trainingChannelStable_={};
   trainingNextMm_ = training_.startMm;
   trainingScanning_ = true;
   trainingMovePending_ = false;
@@ -520,39 +821,8 @@ void MainUi::startTrainingScan(const ff::FFConfig& config,
 }
 
 void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std::optional<ff::RodId> configuredTrainingRod, int layer2TrainingRodCount, bool trainingCandidateCapacityReached, bool& trainingSettingsChanged) {
-  constexpr float actionWidth = 112.0f;
   const auto& rods = config.channels[channel].rods;
   if (training_.valleySettings.maximumCount <= 0) { training_.valleySettings.maximumCount = std::max(1, layer2TrainingRodCount); trainingSettingsChanged = true; }
-  ImGui::BeginDisabled(training_.samples.size() < 3);
-  if (ImGui::Button("Find Valleys", ImVec2(actionWidth, 0))) {
-    const auto detected = ff::GuiTrainingAnalysis::findValleys(service_, training_.samples, training_.valleySettings);
-    training_.candidatesMm.clear();
-    for (double position : detected) {
-      const double left = std::min(training_.startMm, training_.endMm) + 1.5;
-      const double right = std::max(training_.startMm, training_.endMm) - 1.5;
-      const bool separated = std::none_of(
-          training_.candidatesMm.begin(), training_.candidatesMm.end(),
-          [&](double existing) { return std::abs(existing - position) < 3.0; });
-      if (position >= left && position <= right && separated)
-        training_.candidatesMm.push_back(position);
-    }
-    training_.aims.clear(); trainingExecutionTargets_.clear(); trainingNotice_ = "Valley candidates generated. Edit them on the plot, then click Train.";
-    trainingForbiddenDirty_ = true;
-  }
-  tooltip("Detect energy valleys and create editable candidate-position lines.");
-  ImGui::EndDisabled();
-  ImGui::SameLine();
-  ImGui::BeginDisabled(training_.candidatesMm.empty() || !configuredTrainingRod);
-  if (ImGui::Button("Clear Lines", ImVec2(actionWidth, 0))) {
-    training_.candidatesMm.clear();
-    training_.aims.clear();
-    trainingExecutionTargets_.clear();
-    trainingDraggingCandidate_ = -1;
-    trainingForbiddenDirty_ = true;
-    trainingNotice_ = "Candidate lines cleared.";
-  }
-  tooltip("Remove all candidate lines and discard the current training assignment.");
-  ImGui::EndDisabled();
 
   std::vector<double> x, y;
   x.reserve(training_.samples.size()); y.reserve(training_.samples.size());
@@ -596,7 +866,7 @@ void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std
       // interactive.  Pixel-distance hit testing also keeps the grab width
       // constant at every X zoom level.
       int closest = -1;
-      if (ImPlot::IsPlotHovered()) {
+      if (!trainingScanning_ && ImPlot::IsPlotHovered()) {
         const double mouse = ImPlot::GetPlotMousePos().x;
         constexpr float hitPixels = 8.0f;
         float distancePixels = hitPixels;
@@ -616,6 +886,7 @@ void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && closest >= 0) {
           training_.candidatesMm.erase(training_.candidatesMm.begin() + closest);
           training_.aims.clear();
+          training_.executionTargets.clear();
           trainingExecutionTargets_.clear();
           trainingDraggingCandidate_ = -1;
           trainingForbiddenDirty_ = true;
@@ -633,13 +904,14 @@ void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std
             auto trial = training_.candidatesMm; trial.push_back(mouse); std::string reason;
             if (candidateSetIsLegal(trial, &reason)) {
               training_.candidatesMm = std::move(trial);
-              training_.aims.clear(); trainingExecutionTargets_.clear(); trainingForbiddenDirty_ = true;
+              training_.aims.clear(); training_.executionTargets.clear();
+              trainingExecutionTargets_.clear(); trainingForbiddenDirty_ = true;
             }
             else trainingNotice_ = "Candidate rejected: " + reason;
           }
         }
       }
-      if (trainingDraggingCandidate_ >= 0 &&
+      if (!trainingScanning_ && trainingDraggingCandidate_ >= 0 &&
           ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         const auto movingIndex =
@@ -657,11 +929,13 @@ void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std
             training_.candidatesMm[movingIndex] = trainingDragLastSafeMm_;
           }
           training_.aims.clear();
+          training_.executionTargets.clear();
           trainingExecutionTargets_.clear();
           trainingForbiddenDirty_ = true;
         }
       }
-      if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && trainingDraggingCandidate_ >= 0) {
+      if (!trainingScanning_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+          trainingDraggingCandidate_ >= 0) {
         std::string reason;
         if (candidateSetIsLegal(training_.candidatesMm, &reason)) {
           trainingForbiddenDirty_ = true;
@@ -695,36 +969,7 @@ void MainUi::drawTrainingCandidates(const ff::FFConfig& config, int channel, std
 }
 
 void MainUi::drawTrainingResults(const ff::FFConfig& config, int channel, const ff::FFStatus& currentStatus) {
-  constexpr float actionWidth = 112.0f;
   const auto& rods = config.channels[channel].rods;
-  ImGui::BeginDisabled(training_.candidatesMm.empty());
-  if (ImGui::Button("Plan", ImVec2(actionWidth, 0))) updateTrainingAssignment();
-  tooltip("Assign candidate positions to Layer 2 Rods. Other eligible Layer 2 Rods receive the minimum safe evasion moves needed to preserve configured clearance.");
-  ImGui::EndDisabled();
-  ImGui::SameLine();
-  ImGui::BeginDisabled(trainingExecutionTargets_.empty());
-  if (ImGui::Button("Execute", ImVec2(actionWidth, 0))) {
-    // Use the same complete-target submission path as Main UI "load".  The
-    // service refreshes and validates the target state again immediately
-    // before any command is sent.
-    auto result = service_.setRodTargets(trainingExecutionTargets_);
-    if (result) {
-      service_.refresh();
-      for (auto &mainTarget : targets_) {
-        const auto trainedTarget = std::find_if(
-            trainingExecutionTargets_.begin(), trainingExecutionTargets_.end(),
-            [&](const ff::RodTarget &entry) {
-              return entry.address == mainTarget.address;
-            });
-        if (trainedTarget != trainingExecutionTargets_.end())
-          mainTarget = *trainedTarget;
-      }
-      trainingNotice_ =
-          "Training targets were sent and Main UI targets were updated.";
-    } else trainingNotice_ = "Execute failed: " + result.message;
-  }
-  tooltip("Refresh and validate the complete channel target state, then send all Rod targets synchronously like Main UI Load.");
-  ImGui::EndDisabled();
   ImGui::SeparatorText("Layer 2 Rod Positions and Training Aims");
   if (ImGui::BeginTable("TrainingAims", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
     ImGui::TableSetupScrollFreeze(0, 1);
@@ -766,7 +1011,6 @@ void MainUi::drawTrainingResults(const ff::FFConfig& config, int channel, const 
 }
 
 void MainUi::saveTrainingSession(const ff::FFConfig& config) {
-  training_.executionTargets = trainingExecutionTargets_;
   std::ostringstream summary;
   summary << "CH" << (static_cast<int>(training_.channel) + 1)
           << "; Training Rod R" << int(training_.trainingRod)
@@ -831,28 +1075,44 @@ void MainUi::saveTrainingSession(const ff::FFConfig& config) {
   archive.configVersion=config.configVersion;
   archive.createdUnixSeconds=static_cast<std::int64_t>(std::time(nullptr));
   archive.selectedChannel=selected;
+  archive.enabledChannels=service_.enabledChannels();
+  archive.sampleCount=trainingSampleCount_;
   for (int ch=0;ch<3;++ch) {
-    const auto& session=trainingSessions_[ch];
-    const bool hasRecord=ch==selected || session.complete ||
-      !session.samples.empty() || !session.candidatesMm.empty() ||
-      !session.aims.empty() || !session.rodStates.empty() ||
-      !session.executionTargets.empty();
-    if (!hasRecord) continue;
+    if (!archive.enabledChannels[ch]) continue;
+    auto& session=trainingSessions_[ch];
     if ((!session.machineId.empty() && session.machineId!=config.machineId) ||
         (!session.configVersion.empty() && session.configVersion!=config.configVersion)) {
-      trainingNotice_="Save Session failed: a channel belongs to another machine or configuration.";
+      trainingNotice_="Save Session failed: CH"+std::to_string(ch+1)+" belongs to another configuration.";
       return;
     }
+    session.sampleCount=trainingSampleCount_;
+    session.channel=static_cast<ff::ChannelId>(ch);
+    session.machineId=config.machineId;
+    session.configVersion=config.configVersion;
+    session.rodStates.clear();
+    for (size_t rod=0;rod<config.channels[ch].rods.size() &&
+         rod<current.channels[ch].rods.size();++rod)
+      session.rodStates.push_back({{static_cast<ff::ChannelId>(ch),config.channels[ch].rods[rod].id},
+          current.channels[ch].rods[rod].actualPosition,
+          current.channels[ch].rods[rod].targetPosition});
     archive.channels[ch]=session;
   }
   try {
     const fs::path directory(trainingDirectory_);
     fs::create_directories(directory);
-    fs::path path = directory / automaticTrainingFileName(training_);
+    fs::path path = directory / automaticTrainingFileName(training_,archive.enabledChannels);
     const auto stem=path.stem().string();
     for (int suffix=2;fs::exists(path);++suffix)
       path=directory/(stem+"_"+std::to_string(suffix)+".json");
-    auto saved=ff::GuiTrainingAnalysis::saveArchive(service_,path.string(),archive);
+    auto temporary=path.string()+".tmp";
+    auto saved=ff::GuiTrainingAnalysis::saveArchive(service_,temporary,archive);
+    if (saved) {
+      try { fs::rename(temporary,path); }
+      catch (const fs::filesystem_error& error) {
+        fs::remove(temporary);
+        saved=ff::Result<void>::failure(ff::ErrorCode::BackendFailure,error.what());
+      }
+    }
     trainingNotice_=saved ? "Training session saved: "+path.string()
                           : "Save Session failed: "+saved.message;
   } catch (const fs::filesystem_error& error) {
@@ -868,7 +1128,11 @@ void MainUi::drawTrainingFiles(const ff::FFConfig& config) {
         for (int ch=0;ch<3;++ch) {
           trainingSessions_[ch]=loaded.value.channels[ch].value_or(ff::TrainingSession{});
           trainingSessions_[ch].channel=static_cast<ff::ChannelId>(ch);
+          trainingSessions_[ch].executionTargets.clear();
+          trainingSessions_[ch].aims.clear();
         }
+        trainingPlanSignatures_={};
+        trainingSampleCount_=std::clamp(loaded.value.sampleCount,2,100000);
         const int loadedChannel=loaded.value.selectedChannel;
         training_=trainingSessions_[loadedChannel];
         training_.source=ff::TrainingSource::Loaded;

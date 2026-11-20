@@ -2,7 +2,6 @@
 
 // Value types, result codes and status snapshots: see DX_FF_Types.h.
 #include "DX_FF_Types.h"
-#include "DX_FF_MotionPolicy.h"
 #include <functional>
 #include <memory>
 
@@ -40,13 +39,16 @@ public:
   // Connection and feedback.
   Result open(const std::string& configPath, Mode mode,
               const std::array<std::string, 3>& ports = {}, int activeChannels = 3);
+  Result open(const std::string& configPath, Mode mode,
+              const std::array<std::string, 3>& ports, ChannelSelection enabledChannels);
+  Result initialize(const std::string& slot0Path);
   Result close();
   Result refresh();
   Result refresh_rod(Address address);
   MachineInfo machine_info() const;
   void set_status_callback(StatusCallback callback);
 
-  // Loading returns a complete target set without moving Rods.
+  // Loading returns the enabled channels covered by the file without moving Rods.
   ValueResult<PositionSet> load_positions(const std::string& path);
   Result save_positions(const std::string& path, const PositionSet& positions);
   Result record_positions(const std::string& path, const std::string& summary = {});
@@ -55,6 +57,10 @@ public:
   // move_* waits for stable arrival; send_* returns after submission.
   Result move_rods(const std::vector<Target>& targets);
   Result send_rods(const std::vector<Target>& targets);
+  // Submit only the listed enabled Rods; other channels receive no command.
+  Result send_partial_rods(const std::vector<Target>& targets);
+  // Check a partial or complete target set against the latest feedback without sending motion.
+  Result validate_rods(const std::vector<Target>& targets);
   Result move_rod(Address address, std::int32_t encoder);
   Result send_rod(Address address, std::int32_t encoder);
   Result stop();

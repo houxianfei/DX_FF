@@ -1,8 +1,8 @@
 #include "ff/FF.hpp"
+#include "ff/ConfigJson.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
-#include <regex>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -13,31 +13,6 @@ namespace {
 std::string readFile(const std::string &p) {
   std::ifstream f(p);
   return {std::istreambuf_iterator<char>(f), {}};
-}
-std::string strField(const std::string &s, const char *k,
-                     const std::string &d = {}) {
-  std::regex r("\\\"" + std::string(k) + "\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"");
-  std::smatch m;
-  return std::regex_search(s, m, r) ? m[1].str() : d;
-}
-long long intField(const std::string &s, const char *k, long long d = 0) {
-  std::regex r("\\\"" + std::string(k) + "\\\"\\s*:\\s*(-?[0-9]+)");
-  std::smatch m;
-  return std::regex_search(s, m, r) ? std::stoll(m[1].str()) : d;
-}
-double dblField(const std::string &s, const char *k, double d = 0) {
-  std::regex r("\\\"" + std::string(k) +
-               "\\\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)");
-  std::smatch m;
-  return std::regex_search(s, m, r) ? std::stod(m[1].str()) : d;
-}
-bool boolField(const std::string &s, const char *k, bool d = false) {
-  std::regex r("\\\"" + std::string(k) + "\\\"\\s*:\\s*(true|false|1|0)",
-               std::regex::icase);
-  std::smatch match;
-  if (!std::regex_search(s, match, r)) return d;
-  const auto value = match[1].str();
-  return value == "true" || value == "TRUE" || value == "1";
 }
 std::string channelName(ChannelId id) {
   return std::string("CH") + char('1' + static_cast<int>(id));
@@ -84,10 +59,10 @@ Result<void> validateLayerTopology(const FFChannelConfig &channel) {
   for (const auto &member : channel.layerMembers) {
     if (!findRodConfig(channel, member.rod))
       return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                   "Layer member references an unknown Rod");
+                                   "Rod "+std::to_string(member.rod)+" layer_members.rod_id references an unknown Rod");
     if (!seen.insert({member.layer, int(member.rod)}).second)
       return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                   "Duplicate Rod membership in a layer");
+                                   "Rod "+std::to_string(member.rod)+" layer_members is duplicated");
     const bool hasLeft = member.leftNeighbor >= 0;
     const bool hasRight = member.rightNeighbor >= 0;
     if (member.role < 0 || member.role > 3 ||
@@ -96,20 +71,20 @@ Result<void> validateLayerTopology(const FFChannelConfig &channel) {
         (member.role == 2 && (!hasLeft || hasRight)) ||
         (member.role == 3 && (hasLeft || hasRight)))
       return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                   "Layer role and neighbors are inconsistent");
+                                   "Rod "+std::to_string(member.rod)+" layer_members.role/neighbor is inconsistent");
     if (hasLeft) {
       const auto *left =
           findLayerMember(channel, member.layer, member.leftNeighbor);
       if (!left || left->rightNeighbor != int(member.rod))
         return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                     "Layer left neighbor is not reciprocal");
+                                     "Rod "+std::to_string(member.rod)+" layer_members.left_neighbor is not reciprocal");
     }
     if (hasRight) {
       const auto *right =
           findLayerMember(channel, member.layer, member.rightNeighbor);
       if (!right || right->leftNeighbor != int(member.rod))
         return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                     "Layer right neighbor is not reciprocal");
+                                     "Rod "+std::to_string(member.rod)+" layer_members.right_neighbor is not reciprocal");
     }
   }
   return Result<void>::success();
@@ -193,75 +168,7 @@ validateLayerClearance(const FFChannelConfig &channel,
 } // namespace
 
 Result<void> FFConfigIO::validate(const FFConfig &config) {
-  if (config.machineId.empty() || config.configVersion.empty())
-    return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                 "Machine ID and configuration version are required");
-  std::size_t rodCount = 0;
-  for (int i = 0; i < 3; ++i) {
-    const auto &channel = config.channels[i];
-    if (static_cast<int>(channel.id) != i)
-      return Result<void>::failure(ErrorCode::MissingChannel,
-                                   "Configuration must contain CH1, CH2 and CH3");
-    std::unordered_set<int> ids;
-    for (const auto &rod : channel.rods) {
-      ++rodCount;
-      if (!ids.insert(static_cast<int>(rod.id)).second)
-        return Result<void>::failure(ErrorCode::DuplicateId, "Duplicate Rod ID");
-      if (rod.hardMin < 0 || rod.hardMax > 4095 ||
-          rod.hardMin > rod.hardMax || rod.softMin < rod.hardMin ||
-          rod.softMax > rod.hardMax || rod.softMin > rod.softMax ||
-          (rod.safePositionValid && (rod.safePosition < rod.softMin ||
-                                     rod.safePosition > rod.softMax)) ||
-          std::abs(rod.p1) < 1e-12 ||
-          rod.maxVelocity < 1 || rod.maxVelocity > 1023 ||
-          rod.maxAcceleration < 0 || rod.maxAcceleration > 255 ||
-          rod.maxDeceleration < 0 || rod.maxDeceleration > 255 ||
-          std::floor(rod.maxVelocity) != rod.maxVelocity ||
-          std::floor(rod.maxAcceleration) != rod.maxAcceleration ||
-          std::floor(rod.maxDeceleration) != rod.maxDeceleration ||
-          rod.positionTolerance < 0 || rod.stableTime.count() < 0 ||
-          rod.moveTimeout.count() < 0)
-        return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                     "Invalid Rod limits, calibration, or motion parameter");
-      for (const auto &range : rod.absoluteSafeRanges)
-        if (range.first > range.second || range.first < rod.hardMin || range.second > rod.hardMax)
-          return Result<void>::failure(ErrorCode::InvalidConfiguration, "Invalid absolute safe range");
-      for (const auto &range : rod.forbiddenRanges)
-        if (range.first > range.second || range.first < rod.hardMin || range.second > rod.hardMax)
-          return Result<void>::failure(ErrorCode::InvalidConfiguration, "Invalid forbidden range");
-    }
-    if (channel.trainingRod) {
-      if (!findRodConfig(channel, *channel.trainingRod))
-        return Result<void>::failure(
-            ErrorCode::InvalidConfiguration,
-            "Training Rod references an unknown Rod");
-      const bool isLayer2 = std::any_of(
-          channel.layerMembers.begin(), channel.layerMembers.end(),
-          [&](const LayerMembership &member) {
-            return member.layer == 2 && member.rod == *channel.trainingRod;
-          });
-      if (!isLayer2)
-        return Result<void>::failure(
-            ErrorCode::InvalidConfiguration,
-            "Training Rod must be a Layer 2 Rod");
-    }
-    if (auto topology = validateLayerTopology(channel); !topology)
-      return topology;
-    std::set<std::tuple<int, int, int>> rules;
-    for (const auto &rule : channel.clearanceRules) {
-      if (!findRodConfig(channel, rule.first) || !findRodConfig(channel, rule.second) ||
-          rule.first == rule.second || !std::isfinite(rule.minimumClearanceMm) ||
-          !rules.insert({rule.layer, std::min(int(rule.first), int(rule.second)),
-                         std::max(int(rule.first), int(rule.second))}).second)
-        return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                     "Invalid or duplicate clearance rule");
-    }
-  }
-  if (config.maxActiveRodCount == 0 || config.maxActiveRodCount < rodCount ||
-      config.statusExpiration.count() < 0)
-    return Result<void>::failure(ErrorCode::InvalidConfiguration,
-                                 "Invalid system limits");
-  return Result<void>::success();
+  return config_json::validate(config,findRodConfig);
 }
 
 Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
@@ -269,128 +176,15 @@ Result<FFConfig> FFConfigIO::load(const std::string &fileName) {
   if (text.empty())
     return Result<FFConfig>::failure(ErrorCode::InvalidConfiguration,
                                      "Unable to read configuration file");
-  std::replace(text.begin(), text.end(), '\n', ' ');
-  std::replace(text.begin(), text.end(), '\r', ' ');
-  FFConfig c;
-  std::smatch motionMatch;
-  const std::regex motionPattern(R"("rod_motion"\s*:\s*\{([^{}]*)\})");
-  const std::string motion = std::regex_search(text, motionMatch, motionPattern)
-                                 ? motionMatch[1].str() : std::string{};
-  std::smatch motorMatch;
-  const std::regex motorPattern(R"("motor_parameters"\s*:\s*\{([^{}]*)\})");
-  const std::string motor = std::regex_search(text, motorMatch, motorPattern)
-                                ? motorMatch[1].str() : std::string{};
-  c.machineId = strField(text, "machine_id", "FF-001");
-  c.configVersion = strField(text, "config_version", "FF-CONFIG-1.0");
-  c.maxActiveRodCount =
-      static_cast<size_t>(intField(text, "max_active_rod_count", 8));
-  c.statusExpiration =
-      std::chrono::milliseconds(intField(text, "status_expiration_ms", 200));
-  std::regex cr("\\{\\s*\\\"id\\\"\\s*:\\s*\\\"(CH[123])\\\"([\\s\\S]*?)"
-                "\\\"rods\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]",
-                std::regex::icase);
-  std::sregex_iterator it(text.begin(), text.end(), cr), end;
-  std::set<std::string> seen;
-  for (; it != end; ++it) {
-    auto block = (*it)[0].str();
-    auto cid = (*it)[1].str();
-    int idx = cid == "CH1" ? 0 : cid == "CH2" ? 1 : 2;
-    c.channels[idx].id = static_cast<ChannelId>(idx);
-    c.channels[idx].controller.name = strField(block, "name", "CTRL-" + cid);
-    c.channels[idx].controller.serial.portName = strField(block, "port");
-    c.channels[idx].controller.serial.baudRate =
-        static_cast<uint32_t>(intField(block, "baud_rate", 115200));
-    c.channels[idx].controller.serial.timeout =
-        std::chrono::milliseconds(intField(block, "timeout_ms", 500));
-    c.channels[idx].controller.pollPeriod =
-        std::chrono::milliseconds(intField(block, "poll_period_ms", 20));
-    c.channels[idx].controller.retryCount =
-        static_cast<uint32_t>(intField(block, "retry_count", 3));
-    const int configuredTrainingRod =
-        static_cast<int>(intField(block, "training_rod_id", -1));
-    if (configuredTrainingRod >= 0 && configuredTrainingRod <= 255)
-      c.channels[idx].trainingRod =
-          static_cast<RodId>(configuredTrainingRod);
-    // layer_members is intentionally written before rods so it is included in
-    // this channel block. A Rod may appear once for each ordinary layer.
-    std::regex layerArray("\\\"layer_members\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]");
-    std::smatch layerMatch;
-    if (std::regex_search(block, layerMatch, layerArray)) {
-      std::regex member("\\{(.*?)\\}");
-      const auto layerText = layerMatch[1].str();
-      for (std::sregex_iterator li(layerText.begin(), layerText.end(), member);
-           li != end; ++li) {
-        const auto item = (*li)[1].str();
-        LayerMembership membership;
-        membership.rod = static_cast<RodId>(intField(item, "rod_id"));
-        membership.layer = static_cast<int>(intField(item, "layer"));
-        membership.role = static_cast<int>(intField(item, "role"));
-        membership.leftNeighbor =
-            static_cast<int>(intField(item, "left_neighbor", -1));
-        membership.rightNeighbor =
-            static_cast<int>(intField(item, "right_neighbor", -1));
-        c.channels[idx].layerMembers.push_back(membership);
-      }
-    }
-    std::regex clearanceArray(
-        "\\\"clearance_rules\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]");
-    std::smatch clearanceMatch;
-    if (std::regex_search(block, clearanceMatch, clearanceArray)) {
-      std::regex rule("\\{(.*?)\\}");
-      const auto clearanceText = clearanceMatch[1].str();
-      for (std::sregex_iterator ci(clearanceText.begin(), clearanceText.end(),
-                                   rule);
-           ci != end; ++ci) {
-        const auto item = (*ci)[1].str();
-        PairClearanceRule clearance;
-        clearance.layer = static_cast<int>(intField(item, "layer"));
-        clearance.first = static_cast<RodId>(intField(item, "rod_a"));
-        clearance.second = static_cast<RodId>(intField(item, "rod_b"));
-        clearance.minimumClearanceMm = dblField(item, "minimum_clearance_mm");
-        c.channels[idx].clearanceRules.push_back(clearance);
-      }
-    }
-    std::string rods = (*it)[3].str();
-    std::regex rr("\\{(.*?)\\}");
-    for (std::sregex_iterator ri(rods.begin(), rods.end(), rr); ri != end;
-         ++ri) {
-      auto rs = (*ri)[1].str();
-      RodConfig r;
-      r.id = static_cast<RodId>(intField(rs, "id"));
-      r.name = strField(rs, "name", cid + "-R" + std::to_string(r.id));
-      r.hardMin = intField(rs, "hard_min");
-      r.hardMax = intField(rs, "hard_max", 4095);
-      r.softMin = intField(rs, "soft_min", r.hardMin);
-      r.softMax = intField(rs, "soft_max", r.hardMax);
-      r.zeroPosition = intField(rs, "zero_position");
-      r.safePosition = intField(rs, "safe_position");
-      r.safePositionValid = boolField(rs, "safe_position_valid");
-      // optical_position = P0 + P1*u.
-      // Legacy linear fields remain readable as P0/P1.
-      r.p0 = dblField(rs, "P0", dblField(rs, "stroke_bias"));
-      r.p1 = dblField(rs, "P1", dblField(rs, "stroke_slope", 1));
-      r.inwardDirection = intField(rs, "inward_direction", 1);
-      r.maxVelocity = dblField(motor, "speed_limit_raw", dblField(rs, "max_velocity", dblField(motion, "max_velocity", 300)));
-      r.maxAcceleration = dblField(motor, "acceleration_raw", dblField(rs, "max_acceleration", dblField(motion, "max_acceleration", 100)));
-      r.maxDeceleration = dblField(motor, "deceleration_raw", dblField(rs, "max_deceleration", dblField(motion, "max_deceleration", 100)));
-      r.positionTolerance = intField(rs, "position_tolerance", intField(motion, "position_tolerance", 5));
-      r.stableTime =
-          std::chrono::milliseconds(intField(rs, "stable_time_ms", intField(motion, "stable_time_ms", 100)));
-      r.moveTimeout =
-          std::chrono::milliseconds(intField(rs, "move_timeout_ms", intField(motion, "move_timeout_ms", 5000)));
-      c.channels[idx].rods.push_back(r);
-    }
-    seen.insert(cid);
+  try {
+    auto config=config_json::decode(text);
+    auto valid=validate(config);
+    if(!valid) return Result<FFConfig>::failure(valid.error,valid.message);
+    return Result<FFConfig>::success(std::move(config));
+  } catch(const std::exception& error) {
+    return Result<FFConfig>::failure(ErrorCode::InvalidConfiguration,error.what());
   }
-  if (seen.size() != 3 || seen.count("CH1") == 0 || seen.count("CH2") == 0 ||
-      seen.count("CH3") == 0)
-    return Result<FFConfig>::failure(
-        ErrorCode::MissingChannel,
-        "Configuration must contain CH1, CH2 and CH3");
-  auto valid = validate(c);
-  if (!valid)
-    return Result<FFConfig>::failure(valid.error, valid.message);
-  return Result<FFConfig>::success(std::move(c));
+
 }
 
 Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
@@ -418,7 +212,7 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
                                  "Unable to write configuration");
   f << "{\n  \"schema\": \"ff-config\",\n  \"schema_version\": 2,\n  "
        "\"machine_id\": \""
-    << c.machineId << "\",\n  \"config_version\": \"" << c.configVersion
+    << config_json::escape(c.machineId) << "\",\n  \"config_version\": \"" << config_json::escape(c.configVersion)
     << "\",\n  \"max_active_rod_count\": " << c.maxActiveRodCount
     << ",\n  \"status_expiration_ms\": " << c.statusExpiration.count()
     << ",\n  \"coordinate_units\": {\"encoder_position\": \"count\", \"optical_position\": \"mm\", \"motor_speed\": \"raw_0_1023\", \"motor_acceleration\": \"raw_0_255\"},\n";
@@ -431,12 +225,16 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
       << ", \"move_timeout_ms\": " << shared->moveTimeout.count() << "},\n";
   }
   f << "  \"channels\": [\n";
+  bool firstChannel=true;
   for (int i = 0; i < 3; i++) {
     const auto &ch = c.channels[i];
+    if (ch.rods.empty()) continue;
+    if (!firstChannel) f << ",\n";
+    firstChannel=false;
     f << "    {\n"
       << "      \"id\": \"" << channelName(ch.id) << "\",\n"
-      << "      \"controller\": {\"name\": \"" << ch.controller.name
-      << "\", \"serial\": {\"port\": \"" << ch.controller.serial.portName
+      << "      \"controller\": {\"name\": \"" << config_json::escape(ch.controller.name)
+      << "\", \"serial\": {\"port\": \"" << config_json::escape(ch.controller.serial.portName)
       << "\", \"baud_rate\": " << ch.controller.serial.baudRate
       << ", \"timeout_ms\": " << ch.controller.serial.timeout.count()
       << "}, \"poll_period_ms\": " << ch.controller.pollPeriod.count()
@@ -469,7 +267,7 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
     for (size_t j = 0; j < ch.rods.size(); j++) {
       auto &r = ch.rods[j];
       f << "        {\"id\": " << int(r.id)
-        << ", \"name\": \"" << r.name << "\""
+        << ", \"name\": \"" << config_json::escape(r.name) << "\""
         << ", \"hard_min\": " << r.hardMin
         << ", \"hard_max\": " << r.hardMax
         << ", \"soft_min\": " << r.softMin
@@ -490,9 +288,9 @@ Result<void> FFConfigIO::save(const std::string &fileName, const FFConfig &c) {
         << ", \"move_timeout_ms\": " << r.moveTimeout.count();
       f << "}" << (j + 1 == ch.rods.size() ? "\n" : ",\n");
     }
-    f << "      ]\n    }" << (i == 2 ? "\n" : ",\n");
+    f << "      ]\n    }";
   }
-  f << "  ]\n}\n";
+  f << "\n  ]\n}\n";
   return f ? Result<void>::success()
            : Result<void>::failure(ErrorCode::BackendFailure,
                                    "Configuration write failed");
@@ -743,10 +541,11 @@ Result<void> FFChannel::moveAllToPositions(const std::vector<RodTarget> &t) {
   return controller_->submitSynchronous(t);
 }
 
-FF::FF(FFConfig c, std::array<std::unique_ptr<IControllerBackend>, 3> b)
-    : config_(std::move(c)) {
+FF::FF(FFConfig c, std::array<std::unique_ptr<IControllerBackend>, 3> b,
+       std::array<bool,3> enabled)
+    : config_(std::move(c)), enabled_(enabled) {
   for (int i = 0; i < 3; i++)
-    channels_[i] =
+    if (enabled_[i]) channels_[i] =
         std::make_unique<FFChannel>(config_.channels[i], std::move(b[i]));
 }
 FF::~FF() { disconnect(); }
@@ -774,11 +573,13 @@ Result<void> FF::applyConfig(FFConfig c) {
 }
 const FFConfig &FF::config() const noexcept { return config_; }
 Result<void> FF::connect() {
-  for (auto &c : channels_) {
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    auto &c=channels_[i];
     auto x = c->controller().connect();
     if (!x) {
-      for (auto &opened : channels_)
-        opened->controller().disconnect();
+      for (int j=0;j<3;++j)
+        if (enabled_[j]) channels_[j]->controller().disconnect();
       state_ = FFState::Degraded;
       lastError_ = x.message;
       return x;
@@ -789,7 +590,9 @@ Result<void> FF::connect() {
   if (!refreshed)
     return refreshed;
   const auto current = status();
-  for (const auto &safety : current.safety) {
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    const auto &safety=current.safety[i];
     if (safety.state != SafetyState::Safe) {
       disconnect();
       return Result<void>::failure(ErrorCode::SafetyViolation,
@@ -799,14 +602,16 @@ Result<void> FF::connect() {
   return Result<void>::success();
 }
 Result<void> FF::disconnect() {
-  for (auto &c : channels_)
-    c->controller().disconnect();
+  for (int i=0;i<3;++i)
+    if (enabled_[i]) channels_[i]->controller().disconnect();
   state_ = FFState::Offline;
   return Result<void>::success();
 }
 Result<void> FF::refreshStatus() {
   bool anyMoving = false;
-  for (auto &c : channels_) {
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    auto &c=channels_[i];
     auto x = c->controller().refreshStatus();
     if (!x) {
       state_ = FFState::Degraded;
@@ -821,7 +626,7 @@ Result<void> FF::refreshStatus() {
 }
 Result<void> FF::refreshRodStatus(RodAddress address) {
   auto *selectedChannel = channel(address.channel);
-  if (!selectedChannel)
+  if (!selectedChannel || !enabled_[static_cast<int>(address.channel)])
     return Result<void>::failure(ErrorCode::RodNotFound);
   auto refreshed = selectedChannel->controller().refreshStatus(address.rod);
   if (!refreshed) {
@@ -829,24 +634,31 @@ Result<void> FF::refreshRodStatus(RodAddress address) {
     lastError_ = refreshed.message;
   } else if (state_ == FFState::Moving) {
     bool anyMoving = false;
-    for (const auto &channel : channels_)
-      for (const auto &rod : channel->controller().status().rods)
+    for (int i=0;i<3;++i) {
+      if (!enabled_[i]) continue;
+      for (const auto &rod : channels_[i]->controller().status().rods)
         anyMoving = anyMoving || rod.state == RodState::Moving || rod.state == RodState::Homing;
+    }
     if (!anyMoving) state_ = FFState::Ready;
   }
   return refreshed;
 }
 Result<ChannelSafetyStatus> FF::refreshChannelSafety(ChannelId id) {
   auto *c = channel(id);
-  if (!c)
+  if (!c || !enabled_[static_cast<int>(id)])
     return Result<ChannelSafetyStatus>::failure(ErrorCode::RodNotFound);
   return c->controller().refreshAndEvaluateSafety();
 }
 ChannelSafetyStatus FF::channelSafety(ChannelId id) const {
-  return channel(id) ? channel(id)->controller().evaluateSafety()
+  return enabled_[static_cast<int>(id)] ? channel(id)->controller().evaluateSafety()
                      : ChannelSafetyStatus{};
 }
 Result<MotionReceipt> FF::submitMotion(const MotionRequest &r) {
+  for (const auto& target:r.targets) {
+    const int ch=static_cast<int>(target.address.channel);
+    if (ch<0 || ch>=3 || !enabled_[ch])
+      return Result<MotionReceipt>::failure(ErrorCode::InvalidTarget,"Channel is disabled");
+  }
   if (r.targets.size() > 1) {
     auto fresh = refreshStatus();
     if (!fresh)
@@ -920,8 +732,9 @@ Result<void> FF::moveChannelToPositions(ChannelId id,
 }
 Result<void> FF::stopAll() {
   Result<void> firstFailure;
-  for (auto &c : channels_) {
-    auto r=c->controller().stopAll();
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    auto r=channels_[i]->controller().stopAll();
     if(!r && firstFailure) firstFailure=r;
   }
   state_ = FFState::Ready;
@@ -930,16 +743,18 @@ Result<void> FF::stopAll() {
 Result<void> FF::emergencyStop() {
   state_ = FFState::EmergencyStopped;
   Result<void> firstFailure;
-  for (auto &c : channels_) {
-    auto r=c->controller().stopAll();
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    auto r=channels_[i]->controller().stopAll();
     if(!r && firstFailure) firstFailure=r;
   }
   return firstFailure;
 }
 Result<void> FF::resetFaults() {
   Result<void> firstFailure;
-  for (auto &c : channels_) {
-    auto r=c->controller().resetFaults();
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    auto r=channels_[i]->controller().resetFaults();
     if(!r && firstFailure) firstFailure=r;
   }
   if (firstFailure && state_ == FFState::EmergencyStopped)
@@ -951,6 +766,7 @@ FFStatus FF::status() const {
   FFStatus s;
   s.state = state_;
   for (int i = 0; i < 3; i++) {
+    if (!enabled_[i]) continue;
     s.channels[i] = channels_[i]->status();
     s.safety[i] = channels_[i]->controller().evaluateSafety();
     auto layerSafety =
@@ -966,10 +782,12 @@ FFStatus FF::status() const {
   return s;
 }
 FFChannel *FF::channel(ChannelId id) noexcept {
-  return channels_[static_cast<int>(id)].get();
+  const int index=static_cast<int>(id);
+  return index>=0 && index<3 ? channels_[index].get() : nullptr;
 }
 const FFChannel *FF::channel(ChannelId id) const noexcept {
-  return channels_[static_cast<int>(id)].get();
+  const int index=static_cast<int>(id);
+  return index>=0 && index<3 ? channels_[index].get() : nullptr;
 }
 Rod *FF::findRod(RodAddress a) noexcept {
   return channel(a.channel) ? channel(a.channel)->controller().findRod(a.rod)
@@ -981,7 +799,9 @@ const Rod *FF::findRod(RodAddress a) const noexcept {
 }
 Result<void> FF::validateConfiguration() const {
   std::unordered_set<std::string> ports;
-  for (auto &c : config_.channels) {
+  for (int i=0;i<3;++i) {
+    if (!enabled_[i]) continue;
+    const auto &c=config_.channels[i];
     if (c.controller.serial.portName.empty())
       return Result<void>::failure(ErrorCode::InvalidConfiguration,
                                    "Serial port is empty");
@@ -995,7 +815,16 @@ Result<void> FF::validateConfiguration() const {
                                      "Invalid limit configuration");
     auto topology = validateLayerTopology(c);
     if (!topology)
-      return topology;
+      return Result<void>::failure(topology.error,
+          "CH"+std::to_string(i+1)+" "+topology.message);
+    if (c.trainingRod &&
+        std::none_of(c.layerMembers.begin(),c.layerMembers.end(),
+            [&](const LayerMembership& member) {
+              return member.layer==2 && member.rod==*c.trainingRod;
+            }))
+      return Result<void>::failure(ErrorCode::InvalidConfiguration,
+          "CH"+std::to_string(i+1)+" Rod "+std::to_string(*c.trainingRod)+
+          " training_rod_id must be in Layer 2");
   }
   return Result<void>::success();
 }
@@ -1003,6 +832,9 @@ std::string FF::lastError() const { return lastError_; }
 Result<void> FF::validateMotion(const MotionRequest &r) const {
   std::unordered_set<RodAddress, RodAddressHash> seen;
   for (auto &t : r.targets) {
+    const int ch=static_cast<int>(t.address.channel);
+    if (ch<0 || ch>=3 || !enabled_[ch])
+      return Result<void>::failure(ErrorCode::InvalidTarget,"Channel is disabled");
     if (!seen.insert(t.address).second)
       return Result<void>::failure(ErrorCode::DuplicateTarget);
     auto *x = findRod(t.address);

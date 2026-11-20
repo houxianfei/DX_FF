@@ -1,0 +1,32 @@
+#include <windows.h>
+#include <winver.h>
+#include "resource.h"
+
+IDI_FF_GUI ICON "ff_gui.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,1,0
+ PRODUCTVERSION 1,0,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS__WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "RSIC\0"
+            VALUE "FileDescription", "FF GUI\0"
+            VALUE "FileVersion", "1.0.1\0"
+            VALUE "InternalName", "ff_gui\0"
+            VALUE "OriginalFilename", "ff_gui.exe\0"
+            VALUE "ProductName", "FF GUI\0"
+            VALUE "ProductVersion", "1.0.1\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

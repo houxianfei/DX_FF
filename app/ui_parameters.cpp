@@ -50,15 +50,37 @@ bool MainUi::loadParameterFile(const std::string &path) {
 
 void MainUi::parameters() {
   initializeParameters();
-  if (!parametersInitialized_) return;
   bool open = showParameters_;
+  ImGuiWindowClass windowClass;
+  windowClass.ViewportFlagsOverrideSet=ImGuiViewportFlags_NoAutoMerge;
+  ImGui::SetNextWindowClass(&windowClass);
+  const auto origin=ImGui::GetMainViewport()->Pos;
+  ImGui::SetNextWindowPos(ImVec2(origin.x+80.0f,origin.y+60.0f),
+                          ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(980, 700), ImGuiCond_FirstUseEver);
-  if (!ImGui::Begin("FF_Config", &open)) { ImGui::End(); return; }
+  const bool expanded=ImGui::Begin("FF_Config", &open);
+  showParameters_=open;
+  if (!expanded) { ImGui::End(); return; }
+  if (!parametersInitialized_) {
+    ImGui::TextWrapped("Configuration could not be opened: %s",
+                        parameterNotice_.c_str());
+    ImGui::TextDisabled("Current file: %s",configPath_.c_str());
+    if (ImGui::Button("Load configuration..."))
+      ImGuiFileDialog::Instance()->OpenDialog("FFConfigLoad", "Load FF Configuration", ".json", {});
+    if (ImGuiFileDialog::Instance()->Display("FFConfigLoad")) {
+      if (ImGuiFileDialog::Instance()->IsOk()) {
+        if (loadParameterFile(ImGuiFileDialog::Instance()->GetFilePathName()))
+          parametersInitialized_=true;
+      }
+      ImGuiFileDialog::Instance()->Close();
+    }
+    ImGui::End(); return;
+  }
   if (!open && parametersDirty_) {
     ImGui::OpenPopup("Discard unsaved configuration?");
     open = true;
   }
-  showParameters_ = open;
+  showParameters_=open;
   ImGui::TextDisabled("Current file: %s", configPath_.c_str());
   if (ImGui::Button("Load")) {
     if (parametersDirty_) { pendingLoadPath_ = "__open_dialog__"; ImGui::OpenPopup("Discard unsaved configuration?"); }
@@ -80,7 +102,7 @@ void MainUi::parameters() {
   ImGui::SameLine();
   ImGui::BeginDisabled(service_.connected());
   if (ImGui::Button("Apply")) {
-    auto applied = service_.applyConfig(parameterDraft_, simulation_, serialPorts_, enabledChannelCount_);
+    auto applied = service_.applyConfig(parameterDraft_, simulation_, serialPorts_, enabledChannels_);
     if (applied) {
       parameterOriginal_ = parameterDraft_;
       configLoaded_ = true; targetsInitialized_ = false; saveUiSettings();
@@ -225,15 +247,15 @@ void MainUi::drawParameterTraining(ff::FFChannelConfig& channel) {
 
 void MainUi::drawParameterRods(ff::FFChannelConfig& channel, const std::string& label) {
   if (!ImGui::BeginTabItem("Rods")) return;
-  if (ImGui::BeginTable("Rods", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 190))) {
+  if (ImGui::BeginTable("Rods", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, 190))) {
     ImGui::TableSetupScrollFreeze(2, 1);
     ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 45); ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("Soft Min (count)"); ImGui::TableSetupColumn("Soft Max (count)"); ImGui::TableSetupColumn("Safe (count)"); ImGui::TableSetupColumn("P0 (mm)"); ImGui::TableSetupColumn("P1 (mm/count)"); ImGui::TableSetupColumn("Speed Raw"); ImGui::TableHeadersRow();
+    ImGui::TableSetupColumn("Soft Min (count)"); ImGui::TableSetupColumn("Soft Max (count)"); ImGui::TableSetupColumn("Safe (count)"); ImGui::TableSetupColumn("P0 (mm)"); ImGui::TableSetupColumn("P1 (mm/count)"); ImGui::TableHeadersRow();
     for (size_t i = 0; i < channel.rods.size(); ++i) {
       const auto &rod = channel.rods[i]; ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
       if (ImGui::Selectable(std::to_string(int(rod.id)).c_str(), selectedRod_ == int(i), ImGuiSelectableFlags_SpanAllColumns)) selectedRod_ = int(i);
       ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(rod.name.c_str()); ImGui::TableSetColumnIndex(2); ImGui::Text("%d", rod.softMin); ImGui::TableSetColumnIndex(3); ImGui::Text("%d", rod.softMax);
-      ImGui::TableSetColumnIndex(4); ImGui::Text("%d", rod.safePosition); ImGui::TableSetColumnIndex(5); ImGui::Text("%.5f", rod.p0); ImGui::TableSetColumnIndex(6); ImGui::Text("%.7f", rod.p1); ImGui::TableSetColumnIndex(7); ImGui::Text("%.2f", rod.maxVelocity);
+      ImGui::TableSetColumnIndex(4); ImGui::Text("%d", rod.safePosition); ImGui::TableSetColumnIndex(5); ImGui::Text("%.5f", rod.p0); ImGui::TableSetColumnIndex(6); ImGui::Text("%.7f", rod.p1);
     }
     ImGui::EndTable();
   }

@@ -11,6 +11,7 @@ struct FFApplicationService::Impl {
   std::unique_ptr<FF> machine;
   bool simulation{true};
   int activeChannelCount{3};
+  std::array<bool,3> enabled{true,true,true};
   bool connected{false};
   std::string error;
   FFApplicationService::StatusCallback callback;
@@ -19,13 +20,15 @@ struct FFApplicationService::Impl {
 };
 Result<void> FFApplicationService::replaceMachine(
     FFConfig config, bool sim, const std::array<std::string, 3> &serialPorts,
-    int activeChannelCount) {
+    std::array<bool,3> enabled) {
   // The JSON stores editable/default connection values.  Resolve the actual
   // runtime ports first so Simulation and disabled channels are not rejected
   // because of blank or duplicate defaults in the file.
-  activeChannelCount = std::clamp(activeChannelCount, 1, 3);
+  const int activeChannelCount=static_cast<int>(std::count(enabled.begin(),enabled.end(),true));
+  if (!activeChannelCount)
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,"Select at least one channel");
   for (int i = 0; i < 3; ++i) {
-    if (sim || i >= activeChannelCount)
+    if (sim || !enabled[i])
       config.channels[i].controller.serial.portName =
           "SIM-CH" + std::to_string(i + 1);
     else
@@ -34,16 +37,48 @@ Result<void> FFApplicationService::replaceMachine(
   auto valid = FFConfigIO::validate(config);
   if (!valid)
     return valid;
+  size_t enabledRodCount=0;
+  for (int i=0;i<3;++i)
+    if (enabled[i]) enabledRodCount+=config.channels[i].rods.size();
+  if (enabledRodCount>config.maxActiveRodCount)
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,
+        "Enabled motor count exceeds max_active_rod_count");
+  for (int i=0;i<3;++i) {
+    if (!enabled[i]) continue;
+    const auto& channel=config.channels[i];
+    if (channel.rods.empty())
+      return Result<void>::failure(ErrorCode::InvalidConfiguration,
+          "Enabled CH"+std::to_string(i+1)+" has no motors");
+    for (const auto& rod:channel.rods)
+      if (std::none_of(channel.layerMembers.begin(),channel.layerMembers.end(),
+          [&](const LayerMembership& member){return member.rod==rod.id;}))
+        return Result<void>::failure(ErrorCode::InvalidConfiguration,
+            "CH"+std::to_string(i+1)+" Rod "+std::to_string(rod.id)+" has no layer membership");
+    for (const auto& member:channel.layerMembers) {
+      if (member.rightNeighbor<0) continue;
+      const bool found=std::any_of(channel.clearanceRules.begin(),channel.clearanceRules.end(),
+        [&](const PairClearanceRule& rule) {
+          return rule.layer==member.layer &&
+            ((rule.first==member.rod && int(rule.second)==member.rightNeighbor) ||
+             (rule.second==member.rod && int(rule.first)==member.rightNeighbor)) &&
+            std::isfinite(rule.minimumClearanceMm) && rule.minimumClearanceMm>=0;
+        });
+      if (!found)
+        return Result<void>::failure(ErrorCode::InvalidConfiguration,
+            "CH"+std::to_string(i+1)+" missing clearance rule for Rod "+
+            std::to_string(member.rod)+" and Rod "+std::to_string(member.rightNeighbor));
+    }
+  }
   std::array<std::unique_ptr<IControllerBackend>, 3> backends;
   for (int i = 0; i < 3; ++i)
-    backends[i] = (sim || i >= activeChannelCount) ? makeSimulationBackend()
-                                                     : makeMightyZapBackend();
-  auto machine = std::make_unique<FF>(std::move(config), std::move(backends));
+    if (enabled[i]) backends[i] = sim ? makeSimulationBackend() : makeMightyZapBackend();
+  auto machine = std::make_unique<FF>(std::move(config), std::move(backends),enabled);
   auto initialized = machine->initialize();
   if (!initialized)
     return initialized;
   impl_->simulation = sim;
   impl_->activeChannelCount = activeChannelCount;
+  impl_->enabled=enabled;
   impl_->machine = std::move(machine);
   impl_->connected = false;
   return Result<void>::success();
@@ -63,14 +98,22 @@ Result<void>
 FFApplicationService::loadConfig(const std::string &file, bool sim,
                                  const std::array<std::string, 3> &serialPorts,
                                  int activeChannelCount) {
+  if (activeChannelCount<1 || activeChannelCount>3)
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,"Channel count must be 1..3");
+  std::array<bool,3> enabled{};
+  for (int i=0;i<activeChannelCount;++i) enabled[i]=true;
+  return loadConfig(file,sim,serialPorts,enabled);
+}
+Result<void> FFApplicationService::loadConfig(const std::string &file, bool sim,
+                                 const std::array<std::string, 3> &serialPorts,
+                                 std::array<bool,3> enabled) {
   auto loaded = FFConfigIO::load(file);
   if (!loaded)
     return Result<void>::failure(loaded.error, loaded.message);
   std::lock_guard l(impl_->mutex);
   if (impl_->connected)
     return Result<void>::failure(ErrorCode::Busy, "Disconnect FF before loading configuration");
-  auto x = replaceMachine(std::move(loaded.value), sim, serialPorts,
-                          activeChannelCount);
+  auto x = replaceMachine(std::move(loaded.value), sim, serialPorts,enabled);
   if (!x) {
     impl_->error = x.message;
     return x;
@@ -84,7 +127,11 @@ Result<void> FFApplicationService::applyConfig(
   if (impl_->connected)
     return Result<void>::failure(ErrorCode::Busy,
                                  "Disconnect FF before applying configuration");
-  auto x = replaceMachine(config, sim, ports, activeChannelCount);
+  if (activeChannelCount<1 || activeChannelCount>3)
+    return Result<void>::failure(ErrorCode::InvalidConfiguration,"Channel count must be 1..3");
+  std::array<bool,3> enabled{};
+  for (int i=0;i<activeChannelCount;++i) enabled[i]=true;
+  auto x = replaceMachine(config, sim, ports, enabled);
   if (!x)
     impl_->error = x.message;
   return x;
@@ -378,6 +425,9 @@ bool FFApplicationService::simulation() const noexcept {
 }
 int FFApplicationService::activeChannelCount() const noexcept {
   return impl_->activeChannelCount;
+}
+std::array<bool,3> FFApplicationService::enabledChannels() const noexcept {
+  return impl_->enabled;
 }
 std::string FFApplicationService::lastError() const { return impl_->error; }
 void FFApplicationService::setStatusCallback(StatusCallback c) {

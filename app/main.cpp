@@ -3,6 +3,7 @@
 
 #include "app_version.h"
 #include "ff_gui.h"
+#include "resources/resource.h"
 
 // Data
 static ID3D11Device *g_pd3dDevice = nullptr;
@@ -28,10 +29,15 @@ int main() {
 
   // Create application window
   HINSTANCE hInstance = GetModuleHandle(nullptr);
-  HICON hAppIcon = nullptr;
+  HICON hAppIcon = static_cast<HICON>(::LoadImageW(
+      hInstance, MAKEINTRESOURCEW(IDI_FF_GUI), IMAGE_ICON,
+      ::GetSystemMetrics(SM_CXICON), ::GetSystemMetrics(SM_CYICON), LR_SHARED));
+  HICON hSmallIcon = static_cast<HICON>(::LoadImageW(
+      hInstance, MAKEINTRESOURCEW(IDI_FF_GUI), IMAGE_ICON,
+      ::GetSystemMetrics(SM_CXSMICON), ::GetSystemMetrics(SM_CYSMICON), LR_SHARED));
   WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, WndProc,   0L,
                     0L,         hInstance,  hAppIcon,  nullptr,
-                    nullptr,    nullptr,    L"FF GUI", hAppIcon};
+                    nullptr,    nullptr,    L"FF GUI", hSmallIcon};
   ::RegisterClassExW(&wc);
   HWND hwnd =
       ::CreateWindowW(wc.lpszClassName, L"FF GUI", WS_OVERLAPPEDWINDOW, 100,
@@ -45,9 +51,9 @@ int main() {
     return 1;
   }
 
-  // Show the window
+  // The Win32 device window owns the swap chain; ImGui platform windows
+  // present the visible interface.
   ::ShowWindow(hwnd, SW_HIDE);
-  ::UpdateWindow(hwnd);
 
   // Setup Dear ImGui context
   IMGUI_CHECKVERSION();
@@ -60,9 +66,8 @@ int main() {
   io.ConfigFlags |=
       ImGuiConfigFlags_NavEnableGamepad;              // Enable Gamepad Controls
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;   // Enable Docking
-  io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // Enable Multi-Viewport /
-                                                      // Platform Windows
-  io.ConfigViewportsNoAutoMerge = true;
+  io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+  io.IniFilename = nullptr;
 
   // Setup Dear ImGui style
   ImGui::StyleColorsDark();
@@ -145,7 +150,7 @@ int main() {
       break;
 
     // Handle window being minimized or screen locked
-    if (g_SwapChainOccluded &&
+    if (g_SwapChainOccluded && ::IsWindowVisible(hwnd) &&
         g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
       ::Sleep(10);
       continue;
@@ -173,27 +178,26 @@ int main() {
 
     // 2. Show a simple window that we create ourselves. We use a Begin/End pair
     // to create a named window.
-    {
+    if (ff_ui.trainingWindowActive()) {
+      ff_ui.draw();
+    } else {
+      ImGuiWindowClass windowClass;
+      windowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+      ImGui::SetNextWindowClass(&windowClass);
+      ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos, ImGuiCond_FirstUseEver);
+      ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size, ImGuiCond_FirstUseEver);
       if (open) {
-        ImGui::Begin("FF GUI", &open, ImGuiWindowFlags_MenuBar);
+        const bool expanded=ImGui::Begin("FF GUI", &open,
+                                        ImGuiWindowFlags_MenuBar);
+        ff_ui.draw();
+        if (expanded) {
+          ImGui::Text("Software: v%s", FF_GUI_VERSION);
+          ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
+                      1000.0f / io.Framerate, io.Framerate);
+        }
+        ImGui::End();
       } else
         break;
-
-      ff_ui.draw();
-
-      // ImGui::NewLine();
-      // ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools
-      // storing our window open/close state ImGui::SameLine();
-      // ImGui::Checkbox("Demo ImPlot", &show_demo_implot);
-      // if (show_demo_implot) {
-      //    ImPlot::ShowDemoWindow(&show_demo_implot);
-      //}
-
-      ImGui::Text("Software: v%s", FF_GUI_VERSION);
-      // ImGui::SameLine();
-      ImGui::Text("Application average %.3f ms/frame (%.1f FPS)",
-                  1000.0f / io.Framerate, io.Framerate);
-      ImGui::End();
     }
 
     // Rendering
@@ -210,6 +214,19 @@ int main() {
     // Update and Render additional Platform Windows
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
       ImGui::UpdatePlatformWindows();
+      for (ImGuiViewport* viewport : ImGui::GetPlatformIO().Viewports) {
+        if (viewport == ImGui::GetMainViewport()) continue;
+        const auto platformHwnd = static_cast<HWND>(viewport->PlatformHandleRaw);
+        if (!platformHwnd || !::IsWindow(platformHwnd)) continue;
+        if (hAppIcon && reinterpret_cast<HICON>(::SendMessageW(
+                platformHwnd, WM_GETICON, ICON_BIG, 0)) != hAppIcon)
+          ::SendMessageW(platformHwnd, WM_SETICON, ICON_BIG,
+                         reinterpret_cast<LPARAM>(hAppIcon));
+        if (hSmallIcon && reinterpret_cast<HICON>(::SendMessageW(
+                platformHwnd, WM_GETICON, ICON_SMALL, 0)) != hSmallIcon)
+          ::SendMessageW(platformHwnd, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(hSmallIcon));
+      }
       ImGui::RenderPlatformWindowsDefault();
     }
 

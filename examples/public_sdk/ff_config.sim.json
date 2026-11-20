@@ -2,8 +2,8 @@
   "schema":"ff-config", "schema_version":2,
   "machine_id":"SDK-SIM", "config_version":"1",
   "channels":[
-    {"id":"CH1","controller":{"serial":{"port":"SIM1"}},"layer_members":[],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]},
-    {"id":"CH2","controller":{"serial":{"port":"SIM2"}},"layer_members":[],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]},
-    {"id":"CH3","controller":{"serial":{"port":"SIM3"}},"layer_members":[],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]}
+    {"id":"CH1","controller":{"serial":{"port":"SIM1"}},"layer_members":[{"rod_id":0,"layer":2,"role":3,"left_neighbor":-1,"right_neighbor":-1}],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]},
+    {"id":"CH2","controller":{"serial":{"port":"SIM2"}},"layer_members":[{"rod_id":0,"layer":2,"role":3,"left_neighbor":-1,"right_neighbor":-1}],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]},
+    {"id":"CH3","controller":{"serial":{"port":"SIM3"}},"layer_members":[{"rod_id":0,"layer":2,"role":3,"left_neighbor":-1,"right_neighbor":-1}],"clearance_rules":[],"rods":[{"id":0,"hard_min":0,"hard_max":100,"soft_min":10,"soft_max":90,"safe_position":80,"safe_position_valid":true,"position_tolerance":1,"stable_time_ms":20,"move_timeout_ms":1000}]}
   ]
 }

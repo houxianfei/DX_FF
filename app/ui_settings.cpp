@@ -11,53 +11,12 @@
 #include <sstream>
 namespace fs = std::filesystem;
 namespace ff_gui {
-static ff::FFConfig defaultConfig() {
-  ff::FFConfig c;
-  c.machineId = "FF-001";
-  c.configVersion = "FF-CONFIG-1.1";
-  c.maxActiveRodCount = 40;
-  const int rodCounts[3] = {14, 14, 12};
-  for (int i = 0; i < 3; i++) {
-    auto &ch = c.channels[i];
-    ch.id = static_cast<ff::ChannelId>(i);
-    ch.controller.name = "CTRL-CH" + std::to_string(i + 1);
-    ch.controller.serial.portName = "COM" + std::to_string(i + 3);
-    for (int rodIndex = 0; rodIndex < rodCounts[i]; ++rodIndex) {
-      ff::RodConfig r;
-      r.id = static_cast<ff::RodId>(rodIndex);
-      r.name = "CH" + std::to_string(i + 1) + "-R" + std::to_string(rodIndex);
-      r.hardMin = 0;
-      r.hardMax = 4095;
-      r.softMin = 100;
-      r.softMax = 4000;
-      r.zeroPosition = 2048;
-      r.safePosition = 3900;
-      r.safePositionValid = true;
-      // optical_position = P0 + P1*u.
-      r.p0 = 0.0;
-      r.p1 = 90.0 / 4095.0;
-      r.maxVelocity = 300;
-      r.maxAcceleration = 100;
-      r.maxDeceleration = 100;
-      r.positionTolerance = 5;
-      ch.rods.push_back(r);
-    }
-  }
-  return c;
-}
-
 MainUi::MainUi() {
   auto root =
       fs::path(std::getenv("PROGRAMDATA") ? std::getenv("PROGRAMDATA") : ".") /
       "RSIC" / "FF";
   fs::create_directories(root);
-  const fs::path developmentConfig =
-      R"(D:\RSIC\FF\config\defaults\ff_config.json)";
-  // Development runs use the repository configuration explicitly requested by
-  // the team. Installed builds fall back to ProgramData.
-  configPath_ = (fs::exists(developmentConfig) ? developmentConfig
-                                               : root / "ff_config.json")
-                    .string();
+  configPath_ = (root / "ff_config.json").string();
   iniPath_ = (root / "ff_gui.ini").string();
   presetDirectory_ = (root / "position_presets").string();
   fs::create_directories(presetDirectory_);
@@ -119,21 +78,23 @@ bool MainUi::savePreset(int slot,
   return static_cast<bool>(ff::GuiPositionFiles::save(service_, presetPath(slot), file));
 }
 
-std::vector<ff::RodTarget> MainUi::loadPreset(int slot) {
+ff::Result<ff::PositionFileData> MainUi::loadPreset(int slot) {
   const auto config = service_.config();
-  if (!config) return {};
+  if (!config) return ff::Result<ff::PositionFileData>::failure(ff::ErrorCode::InvalidConfiguration,"Configuration unavailable");
   const auto path = fs::exists(presetPath(slot)) ? presetPath(slot) :
       (fs::path(presetDirectory_) / ("slot_" + std::to_string(slot) + ".csv")).string();
   auto file = ff::GuiPositionFiles::load(service_, path, *config);
-  if (!file || !ff::GuiPositionFiles::validate(file.value, *config,
-                                            service_.activeChannelCount())) return {};
-  return file.value.targets;
+  if (!file) return file;
+  auto valid=ff::GuiPositionFiles::validate(file.value,*config,service_.enabledChannels());
+  if (!valid) return ff::Result<ff::PositionFileData>::failure(valid.error,valid.message);
+  return file;
 }
 
 void MainUi::loadUiSettings() {
   std::ifstream input(iniPath_);
   std::string line;
   bool perChannelTrainingSettings = false;
+  bool hasExplicitMask = false;
   while (std::getline(input, line)) {
     const auto split = line.find('=');
     if (split == std::string::npos)
@@ -147,9 +108,15 @@ void MainUi::loadUiSettings() {
     else if (key == "enabled_channels") {
       try {
         enabledChannelCount_ = std::clamp(std::stoi(value), 1, 3);
+        enabledChannels_={enabledChannelCount_>=1,enabledChannelCount_>=2,enabledChannelCount_>=3};
       } catch (const std::exception &) {
         // Ignore malformed user settings and preserve the safe default.
       }
+    } else if (key == "enabled_mask" && value.size()==3 &&
+               value.find_first_not_of("01")==std::string::npos && value!="000") {
+      for (int i=0;i<3;++i) enabledChannels_[i]=value[i]=='1';
+      enabledChannelCount_=static_cast<int>(std::count(enabledChannels_.begin(),enabledChannels_.end(),true));
+      hasExplicitMask=true;
     } else if (key.rfind("serial_ch", 0) == 0) {
       try {
         const int channel = std::stoi(key.substr(9));
@@ -198,6 +165,9 @@ void MainUi::loadUiSettings() {
     } else if (key == "training_settle_ms") {
       try { trainingSettleMs_ = std::clamp(std::stoi(value), 0, 500); }
       catch (const std::exception &) {}
+    } else if (key == "training_sample_count") {
+      try { trainingSampleCount_ = std::clamp(std::stoi(value), 2, 100000); }
+      catch (const std::exception &) {}
     } else if (key == "training_smoothing") {
       try { training_.valleySettings.smoothingPoints = std::stoi(value); } catch (const std::exception &) {}
     } else if (key == "training_prominence") {
@@ -236,6 +206,14 @@ void MainUi::loadUiSettings() {
     }
     training_ = trainingSessions_[std::clamp(static_cast<int>(training_.channel), 0, 2)];
   }
+  if (!hasExplicitMask) {
+    // Legacy installations stored only a channel count. Their old default of
+    // three must not silently enable channels with missing mechanical rules.
+    enabledChannels_={true,false,false};
+    enabledChannelCount_=1;
+    activeChannel_=0;
+    saveUiSettings();
+  }
 }
 
 void MainUi::saveUiSettings() const {
@@ -244,6 +222,8 @@ void MainUi::saveUiSettings() const {
     return;
   output << "mode=" << (simulation_ ? "simulation" : "real") << "\n";
   output << "enabled_channels=" << enabledChannelCount_ << "\n";
+  output << "enabled_mask=" << (enabledChannels_[0]?'1':'0')
+         << (enabledChannels_[1]?'1':'0') << (enabledChannels_[2]?'1':'0') << "\n";
   output << "config_path=" << configPath_ << "\n";
   for (int i = 0; i < 3; ++i)
     output << "serial_ch" << i << "=" << serialPorts_[i] << "\n";
@@ -256,6 +236,7 @@ void MainUi::saveUiSettings() const {
   output << "training_end_mm=" << training_.endMm << "\n";
   output << "training_step_mm=" << training_.stepMm << "\n";
   output << "training_settle_ms=" << trainingSettleMs_ << "\n";
+  output << "training_sample_count=" << trainingSampleCount_ << "\n";
   output << "training_smoothing=" << training_.valleySettings.smoothingPoints << "\n";
   output << "training_prominence="
          << training_.valleySettings.minimumProminenceFraction << "\n";
@@ -290,18 +271,37 @@ void MainUi::scanSerialPorts() {
 }
 
 void MainUi::ensureConfig() {
-  bool needsMigration = !fs::exists(configPath_);
-  if (!needsMigration) {
-    std::ifstream input(configPath_);
-    std::string contents((std::istreambuf_iterator<char>(input)), {});
-    needsMigration = contents.find("FF-CONFIG-1.0") != std::string::npos;
-    if (!needsMigration)
-      needsMigration = !ff::FFConfigIO::load(configPath_);
+  if (!fs::exists(configPath_)) {
+    wchar_t executable[MAX_PATH]{};
+    const auto length=GetModuleFileNameW(nullptr,executable,MAX_PATH);
+    if (!length || length>=MAX_PATH) {
+      configLoaded_=false;
+      notice_="Could not locate the bundled FF configuration.";
+      return;
+    }
+    const auto executableDirectory=fs::path(executable).parent_path();
+    const std::array<fs::path,2> sources{
+        executableDirectory/"ff_config.default.json",
+        executableDirectory.parent_path().parent_path()/"config"/"defaults"/"ff_config.json"};
+    std::string error="Bundled FF configuration is missing or invalid.";
+    for (const auto& source:sources) {
+      if (!fs::is_regular_file(source)) continue;
+      auto checked=ff::FFConfigIO::load(source.string());
+      if (!checked) { error="Bundled FF configuration rejected: "+checked.message; continue; }
+      std::error_code copyError;
+      fs::create_directories(fs::path(configPath_).parent_path(),copyError);
+      if (!copyError) fs::copy_file(source,configPath_,fs::copy_options::none,copyError);
+      if (!copyError) break;
+      error="Could not install FF configuration: "+copyError.message();
+    }
+    if (!fs::is_regular_file(configPath_)) {
+      configLoaded_=false;
+      notice_=error;
+      return;
+    }
   }
-  if (needsMigration)
-    ff::FFConfigIO::save(configPath_, defaultConfig());
   auto x = service_.loadConfig(configPath_, simulation_, serialPorts_,
-                               enabledChannelCount_);
+                               enabledChannels_);
   configLoaded_ = static_cast<bool>(x);
   targetsInitialized_ = false;
   if (!x)
